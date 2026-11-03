@@ -1,0 +1,120 @@
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer as createHttpServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import postgres from 'postgres';
+import { Cloud, type Resolver } from '../cloud.js';
+import { type Config, loadConfig } from '../config.js';
+import { createDatabase, type Database, migrateDatabase } from '../db/client.js';
+import { MemoryMailer } from '../mail.js';
+import { MemoryPlatform } from '../platform/memory.js';
+import { createServer } from '../server.js';
+
+/** Stands in for the API of the instances: health and setup by the provider. */
+async function fakeInstances() {
+  const provisioned = new Set<string>();
+  const calls: Array<{ slug: string; body: unknown; token: string }> = [];
+  const server: Server = createHttpServer((request, response) => {
+    const [, slug, ...rest] = (request.url ?? '').split('/');
+    const path = `/${rest.join('/')}`;
+    if (path === '/api/v1/health/live') {
+      response.writeHead(200).end('{"status":"ok"}');
+      return;
+    }
+    if (path === '/api/v1/setup/provision' && request.method === 'POST') {
+      let body = '';
+      request.on('data', (chunk) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        const token = (request.headers.authorization ?? '').replace(/^Bearer /, '');
+        calls.push({ slug: slug ?? '', body: JSON.parse(body), token });
+        if (provisioned.has(slug ?? '')) {
+          response.writeHead(409).end();
+          return;
+        }
+        provisioned.add(slug ?? '');
+        response.writeHead(201, { 'content-type': 'application/json' }).end(
+          JSON.stringify({
+            link: `https://${slug}.lenipo.test/invite?token=einladung-${slug}`,
+            expiresAt: new Date().toISOString(),
+          }),
+        );
+      });
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  return { server, calls, url: (slug: string) => `http://127.0.0.1:${port}/${slug}` };
+}
+
+export interface TestCloud {
+  config: Config;
+  database: Database;
+  cloud: Cloud;
+  platform: MemoryPlatform;
+  mailer: MemoryMailer;
+  dns: { cname: Map<string, string[]>; a: Map<string, string[]> };
+  clock: { now: Date };
+  setupCalls: Array<{ slug: string; body: unknown; token: string }>;
+  app: Awaited<ReturnType<typeof createServer>>;
+  close(): Promise<void>;
+}
+
+/** A fresh database on the server of TEST_DATABASE_URL or DATABASE_URL, migrated. */
+export async function startTestCloud(): Promise<TestCloud> {
+  const serverUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+  if (!serverUrl) throw new Error('Set DATABASE_URL to a PostgreSQL server for the tests');
+  const name = `lenipo_cloud_test_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  const admin = postgres(serverUrl, { max: 1, onnotice: () => {} });
+  await admin.unsafe(`create database ${name}`);
+  const url = new URL(serverUrl);
+  url.pathname = `/${name}`;
+  const exports = await mkdtemp(join(tmpdir(), 'lenipo-cloud-exports-'));
+  const config = loadConfig({
+    DATABASE_URL: url.toString(),
+    CLOUD_URL: 'https://cloud.lenipo.test',
+    BASE_DOMAIN: 'lenipo.test',
+    SECRET_KEY: 'test-secret-key-0123456789abcdefghijklmn',
+    PLATFORM: 'memory',
+    EXPORT_DIR: exports,
+    WORKER: 'false',
+    LOG_LEVEL: 'fatal',
+  });
+  const database = createDatabase(config.DATABASE_URL);
+  await migrateDatabase(database);
+  const instances = await fakeInstances();
+  const platform = new MemoryPlatform(instances.url);
+  const mailer = new MemoryMailer();
+  const dns = { cname: new Map<string, string[]>(), a: new Map<string, string[]>() };
+  const resolver: Resolver = {
+    cname: async (host) => dns.cname.get(host) ?? [],
+    a: async (host) => dns.a.get(host) ?? [],
+  };
+  const clock = { now: new Date('2026-11-03T10:00:00Z') };
+  const cloud = new Cloud(config, database, platform, mailer, resolver, () => clock.now);
+  const app = await createServer(config, cloud, false);
+  return {
+    config,
+    database,
+    cloud,
+    platform,
+    mailer,
+    dns,
+    clock,
+    setupCalls: instances.calls,
+    app,
+    async close() {
+      await app.close();
+      instances.server.close();
+      await database.sql.end({ timeout: 5 });
+      await admin.unsafe(`drop database if exists ${name} with (force)`);
+      await admin.end({ timeout: 5 });
+      await rm(exports, { recursive: true, force: true });
+    },
+  };
+}

@@ -1,0 +1,59 @@
+# One server of Lenipo Cloud (E-152): the cloud service, the PostgreSQL cluster of the
+# instances and Caddy in front. The instances themselves are containers the cloud service starts
+# in the same network ("lenipo").
+#   cd deploy && cp .env.example .env && docker compose up -d
+name: lenipo-cloud
+
+networks:
+  lenipo:
+    name: lenipo
+
+services:
+  cloud:
+    build: ..
+    restart: unless-stopped
+    # Starts containers through the Docker socket.
+    user: "0"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://cloud:${CLOUD_DB_PASSWORD:?}@postgres:5432/cloud
+      TENANT_DATABASE_ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD:?}@postgres:5432/postgres
+      TENANT_DATABASE_HOST: postgres:5432
+      CADDY_ADMIN_URL: http://caddy:2019
+      DOCKER_NETWORK: lenipo
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - exports:/var/lib/lenipo-cloud/exports
+    networks: [lenipo]
+    depends_on: [postgres, caddy]
+
+  postgres:
+    # PostgreSQL 17 with pgvector, as the product expects.
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      CLOUD_DB_PASSWORD: ${CLOUD_DB_PASSWORD:?}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    networks: [lenipo]
+
+  caddy:
+    # Caddy with the Hetzner DNS module for the wildcard certificate:
+    #   xcaddy build --with github.com/caddy-dns/hetzner
+    image: ${CADDY_IMAGE:-lenipo-caddy:2}
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]
+    environment:
+      HETZNER_DNS_TOKEN: ${HETZNER_DNS_TOKEN:?}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./caddy.json:/etc/caddy/caddy.json:ro
+      - caddy:/data
+    networks: [lenipo]
+
+volumes:
+  postgres:
+  caddy:
+  exports:

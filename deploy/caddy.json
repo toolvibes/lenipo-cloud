@@ -1,0 +1,46 @@
+{
+  "admin": { "listen": "0.0.0.0:2019", "origins": ["caddy:2019"] },
+  "apps": {
+    "http": {
+      "servers": {
+        "srv0": {
+          "listen": [":443", ":80"],
+          "routes": [
+            {
+              "@id": "cloud",
+              "match": [{ "host": ["cloud.lenipo.de"] }],
+              "handle": [{ "handler": "reverse_proxy", "upstreams": [{ "dial": "cloud:8080" }] }],
+              "terminal": true
+            },
+            {
+              "@id": "stopped",
+              "handle": [{ "handler": "reverse_proxy", "upstreams": [{ "dial": "cloud:8080" }] }],
+              "terminal": true
+            }
+          ]
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": ["*.lenipo.de", "cloud.lenipo.de"],
+            "issuers": [
+              {
+                "module": "acme",
+                "challenges": {
+                  "dns": {
+                    "provider": { "name": "hetzner", "api_token": "{env.HETZNER_DNS_TOKEN}" }
+                  }
+                }
+              }
+            ]
+          },
+          { "on_demand": true }
+        ],
+        "on_demand": { "permission": { "module": "http", "endpoint": "http://cloud:8080/tls/ask" } }
+      }
+    }
+  }
+}
