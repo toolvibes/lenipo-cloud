@@ -14,6 +14,10 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
   const app = Fastify({ logger: logger ? { level: config.LOG_LEVEL } : false, trustProxy: true });
   await app.register(formbody);
   await app.register(cookie);
+  // JSON arrives only from Stripe, whose signature covers the raw text.
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) =>
+    done(null, body),
+  );
   const origin = new URL(config.CLOUD_URL);
   const secure = origin.protocol === 'https:';
 
@@ -166,7 +170,27 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
       'Anmeldung bestätigt. Wir richten Ihre Umgebung ein und schicken Ihnen eine Mail, sobald sie bereit ist.',
     domain: 'Gespeichert.',
     verified: 'Die Domain ist bestätigt; Ihre Umgebung ist in Kürze darüber erreichbar.',
-    cancelled: 'Gekündigt. Die Umgebung ist angehalten; der Export folgt per Mail.',
+    cancelled: 'Gekündigt.',
+    kept: 'Die Kündigung ist zurückgenommen.',
+    checkout:
+      'Danke! Sobald die Zahlung bestätigt ist, läuft Ihre Umgebung mit dem gebuchten Tarif weiter.',
+    plan: 'Der Tarif ist geändert.',
+  };
+
+  /** The account page with each instance and the seats it uses. */
+  const accountPage = async (
+    me: { id: string; name: string; email: string; stripeCustomerId: string | null },
+    notice: { ok?: string; error?: string },
+  ) => {
+    const list = await Promise.all(
+      (await cloud.tenantsOf(me.id)).map(async (tenant) => ({
+        tenant,
+        address: cloud.address(tenant),
+        host: cloud.host(tenant),
+        used: await cloud.seatsInUse(tenant.id),
+      })),
+    );
+    return views.account(me, list, notice, !!me.stripeCustomerId);
   };
   const ERRORS: Record<string, string> = {
     dns: 'Der DNS-Eintrag zeigt noch nicht auf Ihre Lenipo-Adresse. Änderungen brauchen manchmal etwas Zeit.',
@@ -175,15 +199,10 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
   app.get<{ Querystring: { ok?: string; error?: string } }>('/account', async (request, reply) => {
     const me = await customer(request);
     if (!me) return reply.redirect('/login');
-    const list = (await cloud.tenantsOf(me.id)).map((tenant) => ({
-      tenant,
-      address: cloud.address(tenant),
-      host: cloud.host(tenant),
-    }));
     return send(
       reply,
       'Kundenkonto',
-      views.account(me, list, {
+      await accountPage(me, {
         ok: OK[request.query.ok ?? ''],
         error: ERRORS[request.query.error ?? ''],
       }),
@@ -202,18 +221,14 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
       if (!me) return reply.redirect('/login', 303);
       try {
         const result = await work(me.id, request.params.id, request.body ?? {});
-        return reply.redirect(`/account?${result}`, 303);
+        // Stripe's pages are absolute addresses, our own answers query strings.
+        return reply.redirect(result.startsWith('https://') ? result : `/account?${result}`, 303);
       } catch (error) {
         if (!(error instanceof CloudError)) throw error;
-        const list = (await cloud.tenantsOf(me.id)).map((tenant) => ({
-          tenant,
-          address: cloud.address(tenant),
-          host: cloud.host(tenant),
-        }));
         return send(
           reply,
           'Kundenkonto',
-          views.account(me, list, { error: error.message }),
+          await accountPage(me, { error: error.message }),
           error.status,
         );
       }
@@ -226,6 +241,53 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
       return 'ok=cancelled';
     }),
   );
+
+  app.post(
+    '/account/tenants/:id/keep',
+    action(async (customerId, tenantId) => {
+      await cloud.keep(customerId, tenantId);
+      return 'ok=kept';
+    }),
+  );
+
+  const seatsOf = (body: Record<string, string>) => Number(String(body.seats ?? '').trim());
+
+  app.post(
+    '/account/tenants/:id/checkout',
+    action((customerId, tenantId, body) =>
+      cloud.checkout(customerId, tenantId, {
+        plan: String(body.plan ?? ''),
+        interval: String(body.interval ?? 'month'),
+        seats: seatsOf(body),
+      }),
+    ),
+  );
+
+  app.post(
+    '/account/tenants/:id/plan',
+    action(async (customerId, tenantId, body) => {
+      await cloud.changePlan(customerId, tenantId, {
+        plan: String(body.plan ?? ''),
+        seats: seatsOf(body),
+      });
+      return 'ok=plan';
+    }),
+  );
+
+  app.post('/account/billing', async (request, reply) => {
+    const me = await customer(request);
+    if (!me) return reply.redirect('/login', 303);
+    return reply.redirect(await cloud.portal(me.id), 303);
+  });
+
+  // Stripe signs the exact bytes of the body.
+  app.post('/stripe/webhook', async (request, reply) => {
+    const ok = await cloud.stripeWebhook(
+      String(request.body ?? ''),
+      request.headers['stripe-signature'] as string | undefined,
+    );
+    return reply.code(ok ? 200 : 400).send(ok ? { received: true } : { error: 'signature' });
+  });
 
   app.post(
     '/account/tenants/:id/domain',

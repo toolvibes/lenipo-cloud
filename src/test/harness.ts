@@ -9,6 +9,7 @@ import { Cloud, type Resolver } from '../cloud.js';
 import { type Config, loadConfig } from '../config.js';
 import { createDatabase, type Database, migrateDatabase } from '../db/client.js';
 import { MemoryMailer } from '../mail.js';
+import { MemoryPayments } from '../payments.js';
 import { MemoryPlatform } from '../platform/memory.js';
 import { createServer } from '../server.js';
 
@@ -16,11 +17,30 @@ import { createServer } from '../server.js';
 async function fakeInstances() {
   const provisioned = new Set<string>();
   const calls: Array<{ slug: string; body: unknown; token: string }> = [];
+  const limits = new Map<string, unknown>();
+  const usage = new Map<string, { persons: number; agents: number; storageMb: number }>();
   const server: Server = createHttpServer((request, response) => {
     const [, slug, ...rest] = (request.url ?? '').split('/');
     const path = `/${rest.join('/')}`;
     if (path === '/api/v1/health/live') {
       response.writeHead(200).end('{"status":"ok"}');
+      return;
+    }
+    if (path === '/api/v1/provider/usage') {
+      response
+        .writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify(usage.get(slug ?? '') ?? { persons: 1, agents: 0, storageMb: 0 }));
+      return;
+    }
+    if (path === '/api/v1/provider/limits' && request.method === 'PUT') {
+      let body = '';
+      request.on('data', (chunk) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        limits.set(slug ?? '', JSON.parse(body));
+        response.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+      });
       return;
     }
     if (path === '/api/v1/setup/provision' && request.method === 'POST') {
@@ -49,7 +69,13 @@ async function fakeInstances() {
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
-  return { server, calls, url: (slug: string) => `http://127.0.0.1:${port}/${slug}` };
+  return {
+    server,
+    calls,
+    limits,
+    usage,
+    url: (slug: string) => `http://127.0.0.1:${port}/${slug}`,
+  };
 }
 
 export interface TestCloud {
@@ -61,6 +87,10 @@ export interface TestCloud {
   dns: { cname: Map<string, string[]>; a: Map<string, string[]> };
   clock: { now: Date };
   setupCalls: Array<{ slug: string; body: unknown; token: string }>;
+  /** The frame each instance got, and what it reports as used. */
+  limits: Map<string, unknown>;
+  usage: Map<string, { persons: number; agents: number; storageMb: number }>;
+  payments: MemoryPayments;
   app: Awaited<ReturnType<typeof createServer>>;
   close(): Promise<void>;
 }
@@ -83,6 +113,13 @@ export async function startTestCloud(): Promise<TestCloud> {
     PLATFORM: 'memory',
     EXPORT_DIR: exports,
     WORKER: 'false',
+    STRIPE_WEBHOOK_SECRET: 'whsec_test',
+    STRIPE_PRICES: JSON.stringify({
+      'team:month': 'price_team_month',
+      'team:year': 'price_team_year',
+      'business:month': 'price_business_month',
+      'business:year': 'price_business_year',
+    }),
     LOG_LEVEL: 'fatal',
   });
   const database = createDatabase(config.DATABASE_URL);
@@ -96,7 +133,8 @@ export async function startTestCloud(): Promise<TestCloud> {
     a: async (host) => dns.a.get(host) ?? [],
   };
   const clock = { now: new Date('2026-11-03T10:00:00Z') };
-  const cloud = new Cloud(config, database, platform, mailer, resolver, () => clock.now);
+  const payments = new MemoryPayments(() => clock.now);
+  const cloud = new Cloud(config, database, platform, mailer, payments, resolver, () => clock.now);
   const app = await createServer(config, cloud, false);
   return {
     config,
@@ -107,6 +145,9 @@ export async function startTestCloud(): Promise<TestCloud> {
     dns,
     clock,
     setupCalls: instances.calls,
+    limits: instances.limits,
+    usage: instances.usage,
+    payments,
     app,
     async close() {
       await app.close();

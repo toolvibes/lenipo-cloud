@@ -35,6 +35,17 @@ export const Config = z.object({
   TENANT_SMTP_URL: z.url({ protocol: /^smtps?$/ }).optional(),
   TENANT_MAIL_FROM: z.string().default('Lenipo <benachrichtigung@lenipo.de>'),
 
+  /** Stripe (E-154); without the secret key, payments only happen in memory (development). */
+  STRIPE_SECRET_KEY: z.string().startsWith('sk_').optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().startsWith('whsec_').optional(),
+  /** Price ids per plan and interval, e.g. {"team:month":"price_…","team:year":"price_…"}. */
+  STRIPE_PRICES: z
+    .string()
+    .default('{}')
+    .transform((value) => z.record(z.string(), z.string()).parse(JSON.parse(value))),
+  /** Stripe Tax works out the VAT; needs it set up in the Stripe account. */
+  STRIPE_AUTOMATIC_TAX: z.stringbool().default(true),
+
   TRIAL_DAYS: z.coerce.number().int().min(1).default(30),
   /** How long data stays after an instance was stopped (trial over, cancelled). */
   RETENTION_DAYS: z.coerce.number().int().min(1).default(30),

@@ -1,10 +1,13 @@
 import { sql } from 'drizzle-orm';
 import {
   bigserial,
+  date,
   index,
   integer,
   jsonb,
   pgTable,
+  primaryKey,
+  real,
   text,
   timestamp,
   uniqueIndex,
@@ -20,6 +23,8 @@ export const customers = pgTable(
     id: uuid().primaryKey(),
     email: text().notNull(),
     name: text().notNull(),
+    /** The customer at Stripe, from the first checkout. */
+    stripeCustomerId: text(),
     createdAt: created(),
   },
   (table) => [uniqueIndex('customers_email_unique').on(table.email)],
@@ -112,6 +117,14 @@ export const tenants = pgTable(
     /** The export after stopping, a file in EXPORT_DIR. */
     exportFile: text(),
     exportReadyAt: timestamp({ withTimezone: true }),
+    /** The booked plan (E-154): team or business, month or year, seats; null in the trial. */
+    plan: text(),
+    interval: text(),
+    seats: integer(),
+    subscriptionId: text(),
+    periodEnd: timestamp({ withTimezone: true }),
+    /** ok, or past_due while Stripe retries a failed payment. */
+    paymentState: text(),
     createdAt: created(),
     deletedAt: timestamp({ withTimezone: true }),
   },
@@ -125,7 +138,18 @@ export const tenants = pgTable(
   ],
 );
 
-export const JOB_KINDS = ['provision', 'suspend', 'resume', 'export', 'delete', 'route'] as const;
+export const JOB_KINDS = [
+  'provision',
+  'suspend',
+  'resume',
+  'export',
+  'delete',
+  'route',
+  /** Sets the plan's frame in the instance. */
+  'limits',
+  /** Reads what the instance uses. */
+  'usage',
+] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 
 /** Work on an instance; the worker runs it to the end or retries it. */
@@ -174,4 +198,19 @@ export const tenantEvents = pgTable(
     details: jsonb().notNull().default({}),
   },
   (table) => [index('tenant_events_tenant_idx').on(table.tenantId, table.at)],
+);
+
+/** What an instance used, once a day (E-154). */
+export const usageSamples = pgTable(
+  'usage_samples',
+  {
+    tenantId: uuid()
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    day: date().notNull(),
+    persons: integer().notNull(),
+    agents: integer().notNull(),
+    storageMb: real().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.tenantId, table.day] })],
 );

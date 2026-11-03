@@ -3,6 +3,7 @@ import { Cloud } from './cloud.js';
 import { loadConfig } from './config.js';
 import { createDatabase, migrateDatabase } from './db/client.js';
 import { createMailer } from './mail.js';
+import { MemoryPayments, StripePayments } from './payments.js';
 import { DockerPlatform } from './platform/docker.js';
 import { MemoryPlatform } from './platform/memory.js';
 import { createServer } from './server.js';
@@ -16,11 +17,15 @@ const platform =
     ? new DockerPlatform(config)
     : new MemoryPlatform((slug) => `http://localhost:4000/${slug}`);
 let log = (text: string) => console.log(text);
+const payments = config.STRIPE_SECRET_KEY
+  ? new StripePayments(config.STRIPE_SECRET_KEY, config.STRIPE_AUTOMATIC_TAX)
+  : new MemoryPayments();
 const cloud = new Cloud(
   config,
   database,
   platform,
   createMailer(config, (text) => log(text)),
+  payments,
 );
 const app = await createServer(config, cloud);
 log = (text) => app.log.info(text);

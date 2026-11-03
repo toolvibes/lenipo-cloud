@@ -15,8 +15,19 @@ import {
   type TenantStatus,
   tenantEvents,
   tenants,
+  usageSamples,
 } from './db/schema.js';
 import type { Mailer } from './mail.js';
+import { fromStripe, type Payments, type Subscription, verifyStripeSignature } from './payments.js';
+import {
+  type Interval,
+  isInterval,
+  isPlanKey,
+  limitsOf,
+  PLANS,
+  type PlanKey,
+  TRIAL_LIMITS,
+} from './plans.js';
 import type { Instance, Platform } from './platform/platform.js';
 import { databaseName } from './platform/platform.js';
 import { decrypt, encrypt, randomToken, sha256 } from './secrets.js';
@@ -96,6 +107,7 @@ export class Cloud {
     private readonly database: Database,
     private readonly platform: Platform,
     private readonly mailer: Mailer,
+    private readonly payments: Payments,
     private readonly resolver: Resolver = systemResolver,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -355,17 +367,298 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
   }
 
   /**
-   * Cancels: in the trial at once, otherwise at the end of the paid period (billing comes with
-   * the next story; until then also at once). The instance stops, the export follows.
+   * Cancels: in the trial at once, a booked plan at the end of the paid period (E-154). Then the
+   * instance stops and the export follows.
    */
   async cancel(customerId: string, tenantId: string) {
     const tenant = await this.tenantOf(customerId, tenantId);
     if (tenant.status !== 'trial' && tenant.status !== 'active') {
       throw new CloudError('Diese Umgebung läuft nicht.', 409);
     }
+    if (tenant.subscriptionId) {
+      const subscription = await this.payments.cancelAtPeriodEnd(tenant.subscriptionId, true);
+      await this.applySubscription(subscription);
+      await this.event(tenant.id, 'cancel-requested', { at: subscription.periodEnd });
+      return;
+    }
     await this.db.update(tenants).set({ cancelAt: this.now() }).where(eq(tenants.id, tenant.id));
     await this.event(tenant.id, 'cancelled');
     await this.suspend(tenant, 'cancelled');
+  }
+
+  /** Takes back a cancellation that has not yet taken effect. */
+  async keep(customerId: string, tenantId: string) {
+    const tenant = await this.tenantOf(customerId, tenantId);
+    if (tenant.status !== 'active' || !tenant.subscriptionId || !tenant.cancelAt) {
+      throw new CloudError('Hier ist keine Kündigung offen.', 409);
+    }
+    await this.applySubscription(
+      await this.payments.cancelAtPeriodEnd(tenant.subscriptionId, false),
+    );
+    await this.event(tenant.id, 'cancel-withdrawn');
+  }
+
+  // ---------------------------------------------------------------- plans and payment (E-154)
+
+  private priceId(plan: PlanKey, interval: Interval): string {
+    const id = this.config.STRIPE_PRICES[`${plan}:${interval}`];
+    if (!id) throw new CloudError('Dieser Tarif ist gerade nicht buchbar.', 503);
+    return id;
+  }
+
+  private planOfPrice(priceId: string): { plan: PlanKey; interval: Interval } | null {
+    for (const [key, id] of Object.entries(this.config.STRIPE_PRICES)) {
+      const [plan = '', interval = ''] = key.split(':');
+      if (id === priceId && isPlanKey(plan) && isInterval(interval)) return { plan, interval };
+    }
+    return null;
+  }
+
+  /** People who take a seat now, from the latest reading; at least one. */
+  async seatsInUse(tenantId: string): Promise<number> {
+    const [sample] = await this.db
+      .select({ persons: usageSamples.persons })
+      .from(usageSamples)
+      .where(eq(usageSamples.tenantId, tenantId))
+      .orderBy(desc(usageSamples.day))
+      .limit(1);
+    return Math.max(1, sample?.persons ?? 1);
+  }
+
+  private async checkSeats(tenantId: string, seats: number) {
+    if (!Number.isInteger(seats) || seats < 1 || seats > 10_000) {
+      throw new CloudError('Bitte eine Zahl von Plätzen zwischen 1 und 10.000 angeben.');
+    }
+    const used = await this.seatsInUse(tenantId);
+    if (seats < used) {
+      throw new CloudError(
+        `In Ihrer Umgebung sind ${used} Personen aktiv. Deaktivieren Sie erst Personen oder buchen Sie mindestens ${used} Plätze.`,
+      );
+    }
+  }
+
+  /** The way to Stripe Checkout for an instance in its trial or stopped after it. */
+  async checkout(
+    customerId: string,
+    tenantId: string,
+    choice: { plan: string; interval: string; seats: number },
+  ): Promise<string> {
+    const tenant = await this.tenantOf(customerId, tenantId);
+    const resumable =
+      tenant.status === 'trial' ||
+      (tenant.status === 'suspended' && tenant.suspendReason === 'trial-ended');
+    if (!resumable || tenant.subscriptionId) {
+      throw new CloudError('Für diese Umgebung lässt sich kein neuer Tarif buchen.', 409);
+    }
+    if (!isPlanKey(choice.plan) || !isInterval(choice.interval)) {
+      throw new CloudError('Bitte Tarif und Laufzeit wählen.');
+    }
+    await this.checkSeats(tenant.id, choice.seats);
+    const [customer] = await this.db.select().from(customers).where(eq(customers.id, customerId));
+    if (!customer) throw new CloudError('Nicht gefunden.', 404);
+    const base = this.config.CLOUD_URL.replace(/\/+$/, '');
+    const { url } = await this.payments.checkout({
+      tenantId: tenant.id,
+      email: customer.email,
+      customerId: customer.stripeCustomerId,
+      priceId: this.priceId(choice.plan, choice.interval),
+      seats: choice.seats,
+      successUrl: `${base}/account?ok=checkout`,
+      cancelUrl: `${base}/account`,
+    });
+    return url;
+  }
+
+  /** Payment method, invoices and billing address at Stripe. */
+  async portal(customerId: string): Promise<string> {
+    const [customer] = await this.db.select().from(customers).where(eq(customers.id, customerId));
+    if (!customer?.stripeCustomerId) {
+      throw new CloudError('Rechnungen gibt es, sobald ein Tarif gebucht ist.', 409);
+    }
+    return (
+      await this.payments.portal(
+        customer.stripeCustomerId,
+        `${this.config.CLOUD_URL.replace(/\/+$/, '')}/account`,
+      )
+    ).url;
+  }
+
+  /** Another plan or number of seats; more is charged at once, less from the next period. */
+  async changePlan(customerId: string, tenantId: string, choice: { plan: string; seats: number }) {
+    const tenant = await this.tenantOf(customerId, tenantId);
+    if (tenant.status !== 'active' || !tenant.subscriptionId || !tenant.plan || !tenant.seats) {
+      throw new CloudError('Für diese Umgebung ist kein Tarif gebucht.', 409);
+    }
+    if (!isPlanKey(choice.plan)) throw new CloudError('Bitte einen Tarif wählen.');
+    await this.checkSeats(tenant.id, choice.seats);
+    const interval = isInterval(tenant.interval ?? '') ? (tenant.interval as Interval) : 'month';
+    const before = PLANS[tenant.plan as PlanKey].price[interval] * tenant.seats;
+    const after = PLANS[choice.plan].price[interval] * choice.seats;
+    const subscription = await this.payments.change(tenant.subscriptionId, {
+      priceId: this.priceId(choice.plan, interval),
+      seats: choice.seats,
+      prorate: after > before,
+    });
+    await this.applySubscription(subscription);
+    await this.event(tenant.id, 'plan-changed', { plan: choice.plan, seats: choice.seats });
+  }
+
+  /** A webhook of Stripe; false when the signature does not fit. */
+  async stripeWebhook(body: string, signature: string | undefined): Promise<boolean> {
+    const secret = this.config.STRIPE_WEBHOOK_SECRET;
+    if (!secret || !verifyStripeSignature(secret, signature, body, this.now().getTime())) {
+      return false;
+    }
+    const event = JSON.parse(body) as { type: string; data: { object: Record<string, unknown> } };
+    const object = event.data.object;
+    switch (event.type) {
+      case 'checkout.session.completed':
+        if (typeof object.subscription === 'string') {
+          await this.applySubscription(await this.payments.subscription(object.subscription));
+        }
+        break;
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted':
+        await this.applySubscription(fromStripe(object as never));
+        break;
+      case 'invoice.payment_failed': {
+        const subscriptionId =
+          typeof object.subscription === 'string'
+            ? object.subscription
+            : ((object.parent as { subscription_details?: { subscription?: string } } | undefined)
+                ?.subscription_details?.subscription ?? null);
+        const [tenant] = subscriptionId
+          ? await this.db.select().from(tenants).where(eq(tenants.subscriptionId, subscriptionId))
+          : [];
+        if (tenant) {
+          await this.noticeOnce(
+            tenant,
+            `payment-failed-${String(object.id)}`,
+            'Lenipo: Zahlung fehlgeschlagen',
+            `Die Zahlung für ${this.address(tenant)} hat nicht geklappt. Wir versuchen es in den nächsten Tagen erneut; bitte prüfen Sie Ihre Zahlungsdaten im Kundenkonto: ${this.config.CLOUD_URL}/account`,
+          );
+        }
+        break;
+      }
+    }
+    return true;
+  }
+
+  /** Takes over what Stripe says about a subscription; repeats change nothing. */
+  async applySubscription(subscription: Subscription) {
+    const [bySubscription] = await this.db
+      .select()
+      .from(tenants)
+      .where(eq(tenants.subscriptionId, subscription.id));
+    const [byMetadata] =
+      bySubscription || !subscription.tenantId
+        ? []
+        : await this.db.select().from(tenants).where(eq(tenants.id, subscription.tenantId));
+    const tenant = bySubscription ?? byMetadata;
+    if (!tenant || tenant.status === 'deleting' || tenant.status === 'deleted') return;
+    const priced = this.planOfPrice(subscription.priceId);
+    if (!priced) throw new Error(`Unknown price ${subscription.priceId}`);
+    await this.db
+      .update(customers)
+      .set({ stripeCustomerId: subscription.customerId })
+      .where(eq(customers.id, tenant.customerId));
+    const running = ['active', 'trialing', 'past_due'].includes(subscription.status);
+    const ended = ['canceled', 'unpaid', 'incomplete_expired'].includes(subscription.status);
+    await this.db
+      .update(tenants)
+      .set({
+        plan: priced.plan,
+        interval: priced.interval,
+        seats: subscription.seats,
+        subscriptionId: subscription.id,
+        periodEnd: subscription.periodEnd,
+        paymentState: subscription.status === 'past_due' ? 'past_due' : 'ok',
+        cancelAt: subscription.cancelAtPeriodEnd ? subscription.periodEnd : null,
+      })
+      .where(eq(tenants.id, tenant.id));
+    if (running && (tenant.status === 'trial' || tenant.status === 'suspended')) {
+      // Booked: the trial ends, a stopped instance comes back with its data.
+      await this.db
+        .update(tenants)
+        .set({
+          status: 'active',
+          trialEndsAt: null,
+          suspendedAt: null,
+          suspendReason: null,
+          deleteAfter: null,
+        })
+        .where(eq(tenants.id, tenant.id));
+      await this.event(tenant.id, 'booked', { plan: priced.plan, seats: subscription.seats });
+      if (tenant.status === 'suspended') await this.enqueue(tenant.id, 'resume');
+      await this.noticeOnce(
+        tenant,
+        `booked-${subscription.id}`,
+        'Lenipo: Danke für Ihre Buchung',
+        `Ihr Tarif ${PLANS[priced.plan].name} mit ${subscription.seats} Plätzen für ${this.address(tenant)} ist aktiv. Rechnungen und Zahlungsdaten finden Sie im Kundenkonto: ${this.config.CLOUD_URL}/account`,
+      );
+    }
+    if (running || tenant.status === 'trial' || tenant.status === 'active') {
+      await this.enqueue(tenant.id, 'limits');
+    }
+    if (ended && tenant.status === 'active') {
+      await this.event(tenant.id, 'subscription-ended', { status: subscription.status });
+      await this.suspend({ ...tenant, status: 'active' }, 'cancelled');
+    }
+  }
+
+  /** The frame of the plan in the instance (the product's provider limits). */
+  private async pushLimits(tenant: TenantRow) {
+    const limits =
+      tenant.plan && isPlanKey(tenant.plan) && tenant.seats
+        ? limitsOf(PLANS[tenant.plan], tenant.seats)
+        : TRIAL_LIMITS;
+    const secrets = decrypt<TenantSecrets>(this.config.SECRET_KEY, tenant.secrets);
+    const response = await fetch(
+      `${this.platform.instanceUrl(tenant.slug)}/api/v1/provider/limits`,
+      {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${secrets.setupToken}`,
+        },
+        body: JSON.stringify(limits),
+      },
+    );
+    if (!response.ok) throw new Error(`Limits: ${response.status} ${await response.text()}`);
+  }
+
+  /** What the instance uses, kept once a day. */
+  private async readUsage(tenant: TenantRow) {
+    const secrets = decrypt<TenantSecrets>(this.config.SECRET_KEY, tenant.secrets);
+    const response = await fetch(
+      `${this.platform.instanceUrl(tenant.slug)}/api/v1/provider/usage`,
+      {
+        headers: { authorization: `Bearer ${secrets.setupToken}` },
+      },
+    );
+    if (!response.ok) throw new Error(`Usage: ${response.status} ${await response.text()}`);
+    const usage = (await response.json()) as { persons: number; agents: number; storageMb: number };
+    const day = this.now().toISOString().slice(0, 10);
+    const values = {
+      persons: usage.persons,
+      agents: usage.agents,
+      storageMb: usage.storageMb,
+    };
+    await this.db
+      .insert(usageSamples)
+      .values({ tenantId: tenant.id, day, ...values })
+      .onConflictDoUpdate({ target: [usageSamples.tenantId, usageSamples.day], set: values });
+  }
+
+  async latestUsage(tenantId: string) {
+    const [sample] = await this.db
+      .select()
+      .from(usageSamples)
+      .where(eq(usageSamples.tenantId, tenantId))
+      .orderBy(desc(usageSamples.day))
+      .limit(1);
+    return sample ?? null;
   }
 
   async setDomain(customerId: string, tenantId: string, input: string) {
@@ -457,8 +750,38 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
     const live = await this.db
       .select()
       .from(tenants)
-      .where(inArray(tenants.status, ['trial', 'suspended'] satisfies TenantStatus[]));
+      .where(inArray(tenants.status, ['trial', 'active', 'suspended'] satisfies TenantStatus[]));
+    const today = now.toISOString().slice(0, 10);
+    const counted = new Set(
+      (
+        await this.db
+          .select({ tenantId: usageSamples.tenantId })
+          .from(usageSamples)
+          .where(eq(usageSamples.day, today))
+      ).map((row) => row.tenantId),
+    );
+    const waiting = new Set(
+      (
+        await this.db
+          .select({ tenantId: jobs.tenantId })
+          .from(jobs)
+          .where(and(eq(jobs.kind, 'usage'), eq(jobs.status, 'queued')))
+      ).map((row) => row.tenantId),
+    );
     for (const tenant of live) {
+      // Once a day: what the running instances use.
+      if (
+        (tenant.status === 'trial' || tenant.status === 'active') &&
+        !counted.has(tenant.id) &&
+        !waiting.has(tenant.id)
+      ) {
+        await this.enqueue(tenant.id, 'usage');
+      }
+      // A cancellation at the end of the period; Stripe's own message may come first.
+      if (tenant.status === 'active' && tenant.cancelAt && tenant.cancelAt <= now) {
+        await this.suspend(tenant, 'cancelled');
+        continue;
+      }
       if (tenant.status === 'trial' && tenant.trialEndsAt) {
         if (tenant.trialEndsAt <= now) {
           await this.suspend(tenant, 'trial-ended');
@@ -607,6 +930,12 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
         await this.platform.ensureInstance(instance());
         await this.platform.ensureRoute(instance());
         return;
+      case 'limits':
+        if (tenant.status !== 'trial' && tenant.status !== 'active') return;
+        return this.pushLimits(tenant);
+      case 'usage':
+        if (tenant.status !== 'trial' && tenant.status !== 'active') return;
+        return this.readUsage(tenant);
       case 'export':
         return this.export(tenant);
       case 'delete':
@@ -659,6 +988,8 @@ Ihr Lenipo-Team`,
       .update(tenants)
       .set({ status: 'trial' })
       .where(and(eq(tenants.id, tenant.id), eq(tenants.status, 'provisioning')));
+    // The trial's frame; a plan booked meanwhile replaces it with its own.
+    await this.pushLimits(await this.load(tenant.id));
     await this.event(tenant.id, 'provisioned');
   }
 
