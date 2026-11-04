@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -27,7 +27,13 @@ function helpers(t: () => TestCloud) {
   };
   const signUp = async (slug: string) => {
     const email = `admin@${slug}.example`;
-    const answer = await post('/signup', { email, name: `Firma ${slug}`, slug });
+    const answer = await post('/signup', {
+      business: 'on',
+      terms: 'on',
+      email,
+      name: `Firma ${slug}`,
+      slug,
+    });
     if (answer.statusCode !== 200) return answer;
     await post('/signup/confirm', { token: tokenOf(t().mailer.linkTo(email)) });
     await t().cloud.runJobs();
@@ -106,7 +112,7 @@ describe('running many instances (TL-104)', () => {
     );
     await t.cloud.runJobs();
     const state = t.platform.state.get('alpha');
-    expect(state?.restored.at(-1)).toBe(await readFile(older.file, 'utf8'));
+    expect(state?.restored.at(-1)).toBe(await t.readPlain(older.file));
     expect(state).toMatchObject({ container: 'running', hosts: ['alpha.lenipo.test'] });
     const kinds = (await t.cloud.fleet.backupsOf(alpha.id)).map((row) => row.kind);
     expect(kinds).toContain('pre-restore');
@@ -191,7 +197,7 @@ describe('running many instances (TL-104)', () => {
       container: 'running',
     });
     expect(t.platform.state.get('alpha')?.restored.at(-1)).toBe(
-      await readFile(preUpdate?.file ?? '', 'utf8'),
+      await t.readPlain(preUpdate?.file ?? ''),
     );
     const events = (await t.cloud.fleet.details('alpha')).events.map((event) => event.kind);
     expect(events).toEqual(expect.arrayContaining(['update-failed', 'rollback-from-backup']));

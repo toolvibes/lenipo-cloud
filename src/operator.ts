@@ -1,4 +1,6 @@
+import type { Compliance } from './compliance.js';
 import type { Fleet } from './fleet.js';
+import { DOCUMENT_KEYS } from './legal.js';
 
 /**
  * The commands of `ops.js` (E-156). They only read and queue work; the running service does it.
@@ -17,7 +19,10 @@ export const USAGE = `ops.js <command>
                                replaces all data with that backup (id or its start)
   sleep <name> | wake <name>
   retry <name>                 failed jobs of the instance run again
-  alerts                       open alerts`;
+  alerts                       open alerts
+  legal status                 documents in force, announced versions, places to fill in
+  legal announce <doc> <n>     releases version n from legal/ for its date and mails customers
+  legal accepted <e-mail>      what a customer accepted, when and from where`;
 
 const date = (value: Date | null | undefined) =>
   value ? value.toISOString().replace('T', ' ').slice(0, 16) : '–';
@@ -39,7 +44,11 @@ function table(rows: string[][]): string {
     .join('\n');
 }
 
-export async function runOps(fleet: Fleet, args: string[]): Promise<string> {
+export async function runOps(
+  fleet: Fleet,
+  args: string[],
+  compliance?: Compliance,
+): Promise<string> {
   const [command, ...rest] = args;
   const flag = (name: string) => {
     const index = rest.indexOf(name);
@@ -191,6 +200,53 @@ export async function runOps(fleet: Fleet, args: string[]): Promise<string> {
             )
             .join('\n\n')
         : 'Keine offenen Alarme.';
+    }
+    case 'legal': {
+      if (!compliance) throw new Error('legal needs the compliance part of the service');
+      const [action, document = '', version = ''] = rest;
+      if (action === 'announce') {
+        const { effective } = await compliance.announce(document, Number(version));
+        return `${document} Fassung ${version} gilt ab ${effective.toISOString().slice(0, 10)}. Die Kunden mit einer Umgebung bekommen innerhalb einer Minute eine Mail.`;
+      }
+      if (action === 'accepted') {
+        const rows = await compliance.acceptancesByEmail(document);
+        if (rows === null) throw new Error(`Kein Kunde mit ${document}`);
+        return rows.length > 0
+          ? table([
+              ['Dokument', 'Fassung', 'Zeitpunkt', 'IP'],
+              ...rows.map((row) => [
+                row.document,
+                String(row.version),
+                date(row.acceptedAt),
+                row.ip ?? '–',
+              ]),
+            ])
+          : 'Keine Zustimmungen gespeichert.';
+      }
+      if (action === 'status' || action === undefined) {
+        const lines = [];
+        for (const key of DOCUMENT_KEYS) {
+          const current = await compliance.current(key);
+          const upcoming = await compliance.upcoming(key);
+          lines.push([
+            key,
+            `Fassung ${current.version} seit ${current.effective.toISOString().slice(0, 10)}`,
+            upcoming
+              ? `Fassung ${upcoming.version} ab ${upcoming.effective.toISOString().slice(0, 10)}`
+              : '',
+          ]);
+        }
+        const open = compliance.openItems();
+        return [
+          table([['Dokument', 'gültig', 'angekündigt'], ...lines]),
+          open.length > 0
+            ? `\nNoch auszufüllen vor dem Start:\n${open.map((item) => `  ${item}`).join('\n')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+      }
+      throw new Error('legal status | announce <doc> <n> | accepted <e-mail>');
     }
     default:
       return USAGE;

@@ -154,6 +154,8 @@ export class DockerPlatform implements Platform {
         NetworkMode: this.config.DOCKER_NETWORK,
         RestartPolicy: { Name: 'unless-stopped' },
         Memory: this.config.INSTANCE_MEMORY_MB * 1024 * 1024,
+        // Logs are overwritten as they go, at most 30 MB per instance (E-157).
+        LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } },
       },
     });
     await this.api('POST', `/containers/${name}/start`, undefined, [304]);

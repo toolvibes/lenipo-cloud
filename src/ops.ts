@@ -29,7 +29,7 @@ const cloud = new Cloud(
   payments,
 );
 try {
-  console.log(await runOps(cloud.fleet, process.argv.slice(2)));
+  console.log(await runOps(cloud.fleet, process.argv.slice(2), cloud.compliance));
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;

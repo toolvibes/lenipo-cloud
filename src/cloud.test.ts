@@ -40,16 +40,26 @@ afterAll(async () => {
 describe('sign-up and provisioning', () => {
   it('checks the address before it sends a confirmation link', async () => {
     const reserved = await post('/signup', {
+      business: 'on',
+      terms: 'on',
       email: 'a@acme.example',
       name: 'Acme',
       slug: 'admin',
     });
     expect(reserved.statusCode).toBe(400);
     expect(reserved.body).toContain('reserviert');
-    const invalid = await post('/signup', { email: 'a@acme.example', name: 'Acme', slug: 'A!' });
+    const invalid = await post('/signup', {
+      business: 'on',
+      terms: 'on',
+      email: 'a@acme.example',
+      name: 'Acme',
+      slug: 'A!',
+    });
     expect(invalid.body).toContain('3 bis 30 Zeichen');
     // What people type comes back escaped.
     const markup = await post('/signup', {
+      business: 'on',
+      terms: 'on',
       email: 'a@acme.example',
       name: '<script>alert(1)</script>',
       slug: 'admin',
@@ -58,6 +68,8 @@ describe('sign-up and provisioning', () => {
     expect(markup.body).not.toContain('<script>alert');
 
     const ok = await post('/signup', {
+      business: 'on',
+      terms: 'on',
       email: 'Clara@Acme.example',
       name: 'Acme GmbH',
       slug: 'acme',
@@ -66,7 +78,13 @@ describe('sign-up and provisioning', () => {
     expect(ok.body).toContain('clara@acme.example');
     expect(t.mailer.sent.at(-1)?.subject).toBe('Lenipo: Bitte bestätigen Sie Ihre Anmeldung');
     // The name waits for the confirmation and is not given twice.
-    const twice = await post('/signup', { email: 'b@other.example', name: 'Other', slug: 'acme' });
+    const twice = await post('/signup', {
+      business: 'on',
+      terms: 'on',
+      email: 'b@other.example',
+      name: 'Other',
+      slug: 'acme',
+    });
     expect(twice.body).toContain('schon vergeben');
   });
 
@@ -113,7 +131,13 @@ describe('sign-up and provisioning', () => {
   });
 
   it('retries a failed step later', async () => {
-    await post('/signup', { email: 'bob@bau.example', name: 'Bau', slug: 'bau' });
+    await post('/signup', {
+      business: 'on',
+      terms: 'on',
+      email: 'bob@bau.example',
+      name: 'Bau',
+      slug: 'bau',
+    });
     const other = await post('/signup/confirm', {
       token: tokenOf(t.mailer.linkTo('bob@bau.example')),
     });
@@ -227,8 +251,8 @@ describe('trial, export and deletion', () => {
     await t.cloud.runJobs();
     expect(t.platform.state.get('acme')).toMatchObject({ container: 'stopped', hosts: [] });
     const exported = await tenantBySlug('acme');
-    expect(exported.exportFile).toMatch(/acme-.+\.zip$/);
-    expect(await readFile(exported.exportFile ?? '', 'utf8')).toMatch(/^PK export of acme #\d+$/);
+    expect(exported.exportFile).toMatch(/acme-.+\.zip\.enc$/);
+    expect(await t.readPlain(exported.exportFile ?? '')).toMatch(/^PK export of acme #\d+$/);
     expect(lastMailTo('clara@acme.example')?.subject).toBe('Lenipo: Ihr Export steht bereit');
     // Sessions last 14 days; sign in again by link.
     expect((await get('/account')).headers.location).toBe('/login');
@@ -240,6 +264,9 @@ describe('trial, export and deletion', () => {
     const download = await get(`/account/tenants/${acme.id}/export`);
     expect(download.statusCode).toBe(200);
     expect(download.headers['content-disposition']).toBe('attachment; filename="lenipo-acme.zip"');
+    // Encrypted at rest, plain in the download (E-157).
+    expect(download.body).toMatch(/^PK export of acme #\d+$/);
+    expect((await readFile(exported.exportFile ?? '')).subarray(0, 4).toString()).toBe('LCF1');
   });
 
   it('deletes everything after the retention and frees the name', async () => {

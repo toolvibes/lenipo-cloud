@@ -53,14 +53,26 @@ button.danger { color:var(--danger); background:transparent; border:1px solid va
 .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .suffix { color:var(--muted); white-space:nowrap; }
 a { color:var(--accent); } code { font-size:13px; }
+main.wide { max-width: 760px; }
+.check { display:flex; gap:8px; align-items:flex-start; font-weight:400; font-size:14px; margin:12px 0 0; }
+.check input { margin-top:4px; }
+.doc h2 { font-size:18px; margin:28px 0 8px; } .doc h3 { font-size:15px; margin:20px 0 6px; }
+.doc ol, .doc ul { padding-left:22px; margin:0 0 12px; } .doc li { margin:0 0 6px; }
+.table { overflow-x:auto; margin:0 0 12px; }
+table { border-collapse:collapse; font-size:13px; width:100%; }
+th, td { text-align:left; vertical-align:top; padding:6px 8px; border-bottom:1px solid var(--border); }
+footer { margin:24px 0 0; display:flex; gap:16px; flex-wrap:wrap; font-size:13px; }
+footer a { color:var(--muted); }
 `;
 
-/** A whole page; `refresh` reloads it after that many seconds. */
-export function page(title: string, body: Html, refresh?: number): string {
+const FOOTER = `<footer><a href="/impressum">Impressum</a><a href="/datenschutz">Datenschutz</a><a href="/agb">AGB</a><a href="/rechtliches">Rechtliches</a></footer>`;
+
+/** A whole page; `refresh` reloads it after that many seconds, `wide` suits long texts. */
+export function page(title: string, body: Html, refresh?: number, wide = false): string {
   return `<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${
     refresh ? `<meta http-equiv="refresh" content="${refresh}">` : ''
   }
 <title>${escapeHtml(title)} · Lenipo Cloud</title><style>${STYLE}</style></head>
-<body><main>${body.value}</main></body></html>`;
+<body><main${wide ? ' class="wide"' : ''}>${body.value}${FOOTER}</main></body></html>`;
 }

@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { promises as dns } from 'node:dns';
 import { rm } from 'node:fs/promises';
 import { and, desc, eq, gt, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
+import { Compliance } from './compliance.js';
 import type { Config } from './config.js';
 import type { Database } from './db/client.js';
 import {
+  acceptances,
   customers,
   type JobKind,
   jobs,
@@ -17,6 +19,7 @@ import {
   tenants,
   usageSamples,
 } from './db/schema.js';
+import { fileKey, sealFile } from './files.js';
 import { Fleet, type Job } from './fleet.js';
 import type { Mailer } from './mail.js';
 import { fromStripe, type Payments, type Subscription, verifyStripeSignature } from './payments.js';
@@ -105,6 +108,8 @@ const systemResolver: Resolver = {
 export class Cloud {
   /** Versions, backups, sleep, health and capacity of all instances (E-156). */
   readonly fleet: Fleet;
+  /** Legal documents, acceptances, announcements and deletion periods (E-157). */
+  readonly compliance: Compliance;
 
   constructor(
     private readonly config: Config,
@@ -115,6 +120,7 @@ export class Cloud {
     private readonly resolver: Resolver = systemResolver,
     private readonly now: () => Date = () => new Date(),
   ) {
+    this.compliance = new Compliance({ config, database, mailer, now });
     this.fleet = new Fleet({
       config,
       database,
@@ -186,7 +192,16 @@ export class Cloud {
   }
 
   /** Stores the sign-up and mails the confirmation link. */
-  async signup(input: { email: string; name: string; slug: string; ip: string | null }) {
+  async signup(input: {
+    email: string;
+    name: string;
+    slug: string;
+    ip: string | null;
+    /** Acts for a business, authority or association, not as a consumer (E-157). */
+    business: boolean;
+    /** Accepts the terms and the data processing agreement with its annexes. */
+    terms: boolean;
+  }) {
     const email = input.email.trim().toLowerCase();
     const slug = input.slug.trim().toLowerCase();
     const name = input.name.trim();
@@ -198,6 +213,16 @@ export class Cloud {
     }
     const problem = await this.slugProblem(slug);
     if (problem) throw new CloudError(problem);
+    if (!input.business) {
+      throw new CloudError(
+        'Lenipo Cloud gibt es nur für Unternehmen, Behörden und Vereine. Bitte bestätigen Sie, dass Sie nicht als Verbraucher handeln.',
+      );
+    }
+    if (!input.terms) {
+      throw new CloudError(
+        'Bitte stimmen Sie den AGB und dem Vertrag zur Auftragsverarbeitung zu.',
+      );
+    }
     if ((await this.fleet.capacity()).full) {
       throw new CloudError(
         'Wir sind gerade ausgebucht und richten weitere Server ein. Bitte versuchen Sie es in ein paar Tagen erneut.',
@@ -221,6 +246,8 @@ export class Cloud {
       slug,
       tokenHash: sha256(token),
       ip: input.ip,
+      accepted: await this.compliance.toAccept(),
+      createdAt: this.now(),
       expiresAt: new Date(this.now().getTime() + SIGNUP_HOURS * 3_600_000),
     });
     await this.mailer.send({
@@ -266,10 +293,23 @@ Ihr Lenipo-Team`,
       if (taken) throw new CloudError('Dieser Name ist inzwischen vergeben.', 409);
       await tx
         .insert(customers)
-        .values({ id: randomUUID(), email: signup.email, name: signup.name })
+        .values({ id: randomUUID(), email: signup.email, name: signup.name, createdAt: this.now() })
         .onConflictDoNothing();
       const [customer] = await tx.select().from(customers).where(eq(customers.email, signup.email));
       if (!customer) throw new Error('Customer missing');
+      // What was accepted with the form, as evidence (E-157).
+      const accepted = Object.entries(signup.accepted);
+      if (accepted.length > 0) {
+        await tx.insert(acceptances).values(
+          accepted.map(([document, version]) => ({
+            customerId: customer.id,
+            document,
+            version,
+            acceptedAt: signup.createdAt,
+            ip: signup.ip,
+          })),
+        );
+      }
       const tenantId = randomUUID();
       const secrets: TenantSecrets = {
         databasePassword: randomToken(24),
@@ -407,6 +447,23 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
     await this.db.update(tenants).set({ cancelAt: this.now() }).where(eq(tenants.id, tenant.id));
     await this.event(tenant.id, 'cancelled');
     await this.suspend(tenant, 'cancelled');
+  }
+
+  /** Deletes a stopped instance before its date, on the customer's request (E-157). */
+  async deleteNow(customerId: string, tenantId: string) {
+    const tenant = await this.tenantOf(customerId, tenantId);
+    if (tenant.status !== 'suspended') {
+      throw new CloudError(
+        'Löschen lässt sich nur eine angehaltene Umgebung. Bitte zuerst kündigen.',
+        409,
+      );
+    }
+    await this.db
+      .update(tenants)
+      .set({ status: 'deleting', deleteAfter: this.now() })
+      .where(and(eq(tenants.id, tenant.id), eq(tenants.status, 'suspended')));
+    await this.event(tenant.id, 'delete-requested');
+    await this.enqueue(tenant.id, 'delete');
   }
 
   /** Takes back a cancellation that has not yet taken effect. */
@@ -876,6 +933,7 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
       }
     }
     await this.fleet.tick();
+    await this.compliance.tick();
   }
 
   /** Runs waiting jobs until none is due; returns how many ran. */
@@ -1100,12 +1158,14 @@ Ihr Lenipo-Team`,
 
   private async export(tenant: TenantRow) {
     if (tenant.status !== 'suspended') return;
-    const file = `${this.config.EXPORT_DIR}/${tenant.slug}-${tenant.id.slice(0, 8)}.zip`;
+    const file = `${this.config.EXPORT_DIR}/${tenant.slug}-${tenant.id.slice(0, 8)}.zip.enc`;
     try {
-      await this.platform.exportInstance(tenant.slug, file);
+      await this.platform.exportInstance(tenant.slug, `${file}.part`);
     } finally {
       await this.platform.stopInstance(tenant.slug);
     }
+    // Encrypted at rest; the download decrypts it on the way out (E-157).
+    await sealFile(`${file}.part`, file, fileKey(this.config.SECRET_KEY));
     await this.db
       .update(tenants)
       .set({ exportFile: file, exportReadyAt: this.now() })
@@ -1132,7 +1192,7 @@ Am ${tenant.deleteAfter?.toLocaleDateString('de-DE') ?? '–'} löschen wir Ihre
       tenant,
       'deleted',
       'Lenipo: Ihre Daten sind gelöscht',
-      `Wie angekündigt haben wir ${this.address(tenant)} mit allen Daten, Sicherungen und dem Export gelöscht. Danke, dass Sie Lenipo ausprobiert haben.`,
+      `Wir haben ${this.address(tenant)} mit allen Daten, Sicherungen und dem Export endgültig gelöscht. Danke, dass Sie Lenipo genutzt haben.`,
     );
     await this.db
       .update(tenants)

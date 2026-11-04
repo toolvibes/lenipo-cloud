@@ -16,6 +16,7 @@ import {
   tenants,
   usageSamples,
 } from './db/schema.js';
+import { fileKey, sealFile, unsealFile } from './files.js';
 import type { Mailer } from './mail.js';
 import { type Interval, isInterval, isPlanKey, PLANS } from './plans.js';
 import type { Instance, Platform } from './platform/platform.js';
@@ -65,7 +66,12 @@ const isLive = (tenant: TenantRow) => LIVE.includes(tenant.status);
  * and earns. The operator works with it through `ops.js` and `/ops/metrics`.
  */
 export class Fleet {
-  constructor(private readonly ctx: FleetContext) {}
+  /** Encrypts backups at rest (E-157). */
+  private readonly key: Buffer;
+
+  constructor(private readonly ctx: FleetContext) {
+    this.key = fileKey(ctx.config.SECRET_KEY);
+  }
 
   private get db() {
     return this.ctx.database.db;
@@ -193,8 +199,9 @@ export class Fleet {
     const dir = this.backupDir(tenant);
     await mkdir(dir, { recursive: true });
     const at = this.ctx.now();
-    const file = join(dir, `${at.toISOString().replace(/[:.]/g, '-')}-${kind}.zip`);
-    await this.ctx.platform.exportInstance(tenant.slug, file);
+    const file = join(dir, `${at.toISOString().replace(/[:.]/g, '-')}-${kind}.zip.enc`);
+    await this.ctx.platform.exportInstance(tenant.slug, `${file}.part`);
+    await sealFile(`${file}.part`, file, this.key);
     const { size } = await stat(file);
     const [row] = await this.db
       .insert(backups)
@@ -285,7 +292,14 @@ export class Fleet {
     await platform.ensureDatabase(instance);
     await platform.ensureInstance(instance);
     await this.ctx.waitUntilLive(platform.instanceUrl(tenant.slug));
-    await platform.restoreInstance(tenant.slug, backup.file);
+    // The instance gets the plain backup only for the moment of the restore.
+    const plain = `${backup.file}.restore`;
+    await unsealFile(backup.file, plain, this.key);
+    try {
+      await platform.restoreInstance(tenant.slug, plain);
+    } finally {
+      await rm(plain, { force: true });
+    }
     await this.ready(tenant.slug);
     await platform.ensureRoute(instance);
     // The frame of the plan as it is now, not as it was in the backup.

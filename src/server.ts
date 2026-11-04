@@ -1,9 +1,12 @@
-import { createReadStream, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import cookie from '@fastify/cookie';
 import formbody from '@fastify/formbody';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { type Cloud, CloudError } from './cloud.js';
+import { ComplianceError } from './compliance.js';
 import type { Config } from './config.js';
+import { fileKey, openFile } from './files.js';
+import { ACCEPTED, DOCUMENT_KEYS, DOCUMENTS } from './legal.js';
 import { constantTimeEquals } from './secrets.js';
 import { page } from './views/html.js';
 import * as views from './views/pages.js';
@@ -12,7 +15,18 @@ const SESSION = 'lc_session';
 
 /** The web pages of Lenipo Cloud: sign-up, sign-in by link, the customer account. */
 export async function createServer(config: Config, cloud: Cloud, logger = true) {
-  const app = Fastify({ logger: logger ? { level: config.LOG_LEVEL } : false, trustProxy: true });
+  // Logs without IP addresses and query strings, which carry the sign-in links (E-157).
+  const app = Fastify({
+    logger: logger
+      ? {
+          level: config.LOG_LEVEL,
+          serializers: {
+            req: (request) => ({ method: request.method, url: request.url.split('?')[0] }),
+          },
+        }
+      : false,
+    trustProxy: true,
+  });
   await app.register(formbody);
   await app.register(cookie);
   // JSON arrives only from Stripe, whose signature covers the raw text.
@@ -20,6 +34,7 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
     done(null, body),
   );
   const origin = new URL(config.CLOUD_URL);
+  const exportKey = fileKey(config.SECRET_KEY);
   const secure = origin.protocol === 'https:';
 
   const send = (reply: FastifyReply, title: string, body: Parameters<typeof page>[1], code = 200) =>
@@ -54,7 +69,7 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
   });
 
   app.setErrorHandler(async (error, request, reply) => {
-    if (error instanceof CloudError) {
+    if (error instanceof CloudError || error instanceof ComplianceError) {
       return send(
         reply,
         'Fehler',
@@ -101,39 +116,84 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
 
   app.get('/', async (_request, reply) => reply.redirect('/signup'));
 
+  // The legal documents (E-157): the version in force, every version under /<document>/v/<n>.
+  const legalPage = async (
+    reply: FastifyReply,
+    document: (typeof DOCUMENT_KEYS)[number],
+    version?: number,
+  ) => {
+    const { compliance } = cloud;
+    const current = await compliance.current(document);
+    const upcoming = await compliance.upcoming(document);
+    const announced = await compliance.announced();
+    const all = compliance.legal
+      .all(document)
+      .filter(
+        (entry) =>
+          entry.version <= current.version ||
+          entry.version === upcoming?.version ||
+          announced.has(`${document}:${entry.version}`) ||
+          !DOCUMENTS[document].contract,
+      );
+    const entry = version === undefined ? current : all.find((item) => item.version === version);
+    if (!entry) throw new CloudError('Diese Fassung gibt es nicht.', 404);
+    return reply
+      .code(200)
+      .type('text/html; charset=utf-8')
+      .send(page(entry.title, views.legalDocument(entry, current, all, upcoming), undefined, true));
+  };
+  for (const document of DOCUMENT_KEYS) {
+    app.get(`/${document}`, async (_request, reply) => legalPage(reply, document));
+    app.get<{ Params: { version: string } }>(`/${document}/v/:version`, async (request, reply) =>
+      legalPage(reply, document, Number(request.params.version)),
+    );
+  }
+  app.get('/rechtliches', async (_request, reply) => {
+    const entries = await Promise.all(
+      DOCUMENT_KEYS.map(async (document) => ({
+        current: await cloud.compliance.current(document),
+        count: cloud.compliance.legal.all(document).length,
+      })),
+    );
+    return reply
+      .type('text/html; charset=utf-8')
+      .send(page('Rechtliches', views.legalIndex(entries), undefined, true));
+  });
+
   app.get('/signup', async (_request, reply) =>
     send(reply, 'Anmelden', views.signupForm(config.BASE_DOMAIN)),
   );
 
-  app.post<{ Body: { email?: string; name?: string; slug?: string } }>(
-    '/signup',
-    async (request, reply) => {
-      const values = {
-        email: String(request.body?.email ?? ''),
-        name: String(request.body?.name ?? ''),
-        slug: String(request.body?.slug ?? ''),
-      };
-      try {
-        await cloud.signup({ ...values, ip: request.ip });
-      } catch (error) {
-        if (!(error instanceof CloudError)) throw error;
-        return send(
-          reply,
-          'Anmelden',
-          views.signupForm(config.BASE_DOMAIN, values, error.message),
-          error.status,
-        );
-      }
+  app.post<{
+    Body: { email?: string; name?: string; slug?: string; business?: string; terms?: string };
+  }>('/signup', async (request, reply) => {
+    const values = {
+      email: String(request.body?.email ?? ''),
+      name: String(request.body?.name ?? ''),
+      slug: String(request.body?.slug ?? ''),
+      business: request.body?.business === 'on',
+      terms: request.body?.terms === 'on',
+    };
+    try {
+      await cloud.signup({ ...values, ip: request.ip });
+    } catch (error) {
+      if (!(error instanceof CloudError)) throw error;
       return send(
         reply,
-        'Postfach prüfen',
-        views.message(
-          'Bitte bestätigen',
-          `Wir haben einen Link an ${values.email.trim().toLowerCase()} geschickt. Mit ihm bestätigen Sie die Anmeldung; danach richten wir Ihre Umgebung ein.`,
-        ),
+        'Anmelden',
+        views.signupForm(config.BASE_DOMAIN, values, error.message),
+        error.status,
       );
-    },
-  );
+    }
+    return send(
+      reply,
+      'Postfach prüfen',
+      views.message(
+        'Bitte bestätigen',
+        `Wir haben einen Link an ${values.email.trim().toLowerCase()} geschickt. Mit ihm bestätigen Sie die Anmeldung; danach richten wir Ihre Umgebung ein.`,
+      ),
+    );
+  });
 
   app.get<{ Querystring: { token?: string } }>('/signup/confirm', async (request, reply) => {
     const token = String(request.query.token ?? '');
@@ -198,6 +258,7 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
     checkout:
       'Danke! Sobald die Zahlung bestätigt ist, läuft Ihre Umgebung mit dem gebuchten Tarif weiter.',
     plan: 'Der Tarif ist geändert.',
+    deleting: 'Die Umgebung wird gelöscht; Sie bekommen eine Bestätigung per Mail.',
   };
 
   /** The account page with each instance and the seats it uses. */
@@ -213,7 +274,27 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
         used: await cloud.seatsInUse(tenant.id),
       })),
     );
-    return views.account(me, list, notice, !!me.stripeCustomerId);
+    const accepted = await cloud.compliance.acceptedBy(me.id);
+    const contracts = await Promise.all(
+      ACCEPTED.map(async (document) => {
+        const upcoming = await cloud.compliance.upcoming(document);
+        return {
+          document,
+          title: DOCUMENTS[document].title,
+          current: (await cloud.compliance.current(document)).version,
+          accepted: accepted[document],
+          upcoming: upcoming && { version: upcoming.version, effective: upcoming.effective },
+        };
+      }),
+    );
+    return views.account(
+      me,
+      list,
+      notice,
+      !!me.stripeCustomerId,
+      contracts,
+      await cloud.compliance.canDelete(me.id),
+    );
   };
   const ERRORS: Record<string, string> = {
     dns: 'Der DNS-Eintrag zeigt noch nicht auf Ihre Lenipo-Adresse. Änderungen brauchen manchmal etwas Zeit.',
@@ -264,6 +345,30 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
       return 'ok=cancelled';
     }),
   );
+
+  app.post(
+    '/account/tenants/:id/delete',
+    action(async (customerId, tenantId) => {
+      await cloud.deleteNow(customerId, tenantId);
+      return 'ok=deleting';
+    }),
+  );
+
+  app.post('/account/delete', async (request, reply) => {
+    const me = await customer(request);
+    if (!me) return reply.redirect('/login', 303);
+    await cloud.compliance.deleteAccount(me.id);
+    await cloud.endSession(request.cookies[SESSION]);
+    reply.clearCookie(SESSION, { path: '/' });
+    return send(
+      reply,
+      'Kundenkonto gelöscht',
+      views.message(
+        'Kundenkonto gelöscht',
+        'Ihr Kundenkonto ist gelöscht. Eine Bestätigung ist per Mail unterwegs.',
+      ),
+    );
+  });
 
   app.post(
     '/account/tenants/:id/keep',
@@ -337,7 +442,7 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
     return reply
       .type('application/zip')
       .header('content-disposition', `attachment; filename="lenipo-${tenant.slug}.zip"`)
-      .send(createReadStream(tenant.exportFile));
+      .send(await openFile(tenant.exportFile, exportKey));
   });
 
   /** Caddy asks before it fetches a certificate on demand. */

@@ -67,7 +67,7 @@ const stripeSubscription = (id: string, overrides: Record<string, unknown> = {})
 };
 
 async function signUp(email: string, slug: string) {
-  await post('/signup', { email, name: `Firma ${slug}`, slug });
+  await post('/signup', { business: 'on', terms: 'on', email, name: `Firma ${slug}`, slug });
   const confirmed = await post('/signup/confirm', { token: tokenOf(t.mailer.linkTo(email)) });
   cookie = String(confirmed.headers['set-cookie']).split(';')[0] ?? '';
   await t.cloud.runJobs();

@@ -42,6 +42,8 @@ export const signups = pgTable(
     slug: text().notNull(),
     tokenHash: text().notNull(),
     ip: text(),
+    /** Versions of the contract documents accepted with the form, e.g. {"agb":1,"avv":1} (E-157). */
+    accepted: jsonb().$type<Record<string, number>>().notNull().default({}),
     createdAt: created(),
     expiresAt: timestamp({ withTimezone: true }).notNull(),
     confirmedAt: timestamp({ withTimezone: true }),
@@ -293,4 +295,46 @@ export const opsAlerts = pgTable(
   (table) => [
     uniqueIndex('ops_alerts_open_unique').on(table.key).where(sql`${table.closedAt} is null`),
   ],
+);
+
+/** Which version of a contract document a customer accepted, when and from where (E-157). */
+export const acceptances = pgTable(
+  'acceptances',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    customerId: uuid()
+      .notNull()
+      .references(() => customers.id, { onDelete: 'cascade' }),
+    document: text().notNull(),
+    version: integer().notNull(),
+    acceptedAt: timestamp({ withTimezone: true }).notNull(),
+    ip: text(),
+  },
+  (table) => [index('acceptances_customer_idx').on(table.customerId, table.document)],
+);
+
+/** A new version of a legal document, announced with its date (E-157). */
+export const legalAnnouncements = pgTable(
+  'legal_announcements',
+  {
+    document: text().notNull(),
+    version: integer().notNull(),
+    announcedAt: created(),
+    effectiveAt: timestamp({ withTimezone: true }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.document, table.version] })],
+);
+
+/** Which customer got the mail about an announced version. */
+export const legalNotices = pgTable(
+  'legal_notices',
+  {
+    customerId: uuid()
+      .notNull()
+      .references(() => customers.id, { onDelete: 'cascade' }),
+    document: text().notNull(),
+    version: integer().notNull(),
+    sentAt: created(),
+  },
+  (table) => [primaryKey({ columns: [table.customerId, table.document, table.version] })],
 );

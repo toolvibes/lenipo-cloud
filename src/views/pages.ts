@@ -1,13 +1,21 @@
 import type { tenants } from '../db/schema.js';
+import type { DocumentKey, LegalVersion } from '../legal.js';
 import { PLAN_KEYS, PLANS, type PlanKey } from '../plans.js';
 import { type Html, html } from './html.js';
+import { markdown } from './markdown.js';
 
 type Tenant = typeof tenants.$inferSelect;
 const date = (value: Date | null) => (value ? value.toLocaleDateString('de-DE') : '–');
 
 export function signupForm(
   baseDomain: string,
-  values: { email?: string; name?: string; slug?: string } = {},
+  values: {
+    email?: string;
+    name?: string;
+    slug?: string;
+    business?: boolean;
+    terms?: boolean;
+  } = {},
   error?: string,
 ): Html {
   return html`<div class="card">
@@ -25,6 +33,10 @@ export function signupForm(
         <span class="suffix">.${baseDomain}</span>
       </div>
       <p class="muted" id="slug-help">3 bis 30 Zeichen: Kleinbuchstaben, Ziffern, Bindestriche. Eine eigene Domain können Sie später eintragen.</p>
+      <label class="check"><input type="checkbox" name="business" value="on" required ${values.business ? html`checked` : ''}>
+        <span>Ich nutze Lenipo Cloud für ein Unternehmen, eine Behörde oder einen Verein, nicht als Verbraucher.</span></label>
+      <label class="check"><input type="checkbox" name="terms" value="on" required ${values.terms ? html`checked` : ''}>
+        <span>Ich stimme den <a href="/agb" target="_blank">AGB</a> und dem <a href="/avv" target="_blank">Vertrag zur Auftragsverarbeitung</a> mit seinen Anlagen (<a href="/tom" target="_blank">technische und organisatorische Maßnahmen</a>, <a href="/unterauftragnehmer" target="_blank">Unterauftragnehmer</a>) zu. Die <a href="/datenschutz" target="_blank">Datenschutzerklärung</a> habe ich zur Kenntnis genommen.</span></label>
       <button type="submit">Anmelden</button>
     </form>
     <p class="muted" style="margin-top:16px">Schon angemeldet? <a href="/login">Zum Kundenkonto</a></p>
@@ -81,11 +93,21 @@ export interface TenantView {
   used: number;
 }
 
+export interface ContractView {
+  document: DocumentKey;
+  title: string;
+  current: number;
+  accepted?: number;
+  upcoming?: { version: number; effective: Date };
+}
+
 export function account(
   customer: { name: string; email: string },
   list: TenantView[],
   notice?: { ok?: string; error?: string },
   billing = false,
+  contracts: ContractView[] = [],
+  deletable = false,
 ): Html {
   return html`<div class="card">
     <div class="row" style="justify-content:space-between">
@@ -102,7 +124,31 @@ export function account(
         ? html`<form method="post" action="/account/billing"><button class="secondary">Zahlungsdaten und Rechnungen</button></form>`
         : ''
     }
+    ${contracts.length ? contractList(contracts) : ''}
+    ${
+      deletable
+        ? html`<h2>Kundenkonto löschen</h2>
+          <p class="muted">Ohne Umgebung brauchen Sie das Konto nicht mehr. Es wird sonst 90 Tage nach dem Löschen der letzten Umgebung entfernt.</p>
+          <form method="post" action="/account/delete" onsubmit="return confirm('Kundenkonto endgültig löschen?')"><button class="danger">Kundenkonto löschen</button></form>`
+        : ''
+    }
   </div>`;
+}
+
+function contractList(contracts: ContractView[]): Html {
+  return html`<h2>Ihr Vertrag</h2>
+    <ul class="muted" style="padding-left:18px">
+      ${contracts.map(
+        (entry) =>
+          html`<li><a href="/${entry.document}">${entry.title}</a>, gültige Fassung ${entry.current}${
+            entry.accepted ? html` (bei der Anmeldung angenommen: Fassung ${entry.accepted})` : ''
+          }${
+            entry.upcoming
+              ? html`. <strong>Neue Fassung ${entry.upcoming.version} ab ${date(entry.upcoming.effective)}</strong>: <a href="/${entry.document}/v/${entry.upcoming.version}">lesen</a>`
+              : ''
+          }</li>`,
+      )}
+    </ul>`;
 }
 
 const euro = (value: number) =>
@@ -173,7 +219,10 @@ function tenantCard(view: TenantView): Html {
             tenant.exportReadyAt
               ? html`<p><a href="/account/tenants/${tenant.id}/export">Export herunterladen</a> <span class="muted">(ZIP, lässt sich in jede Lenipo-Instanz zurückspielen)</span></p>`
               : html`<p class="muted">Der Export wird erstellt; Sie bekommen eine Mail.</p>`
-          }`
+          }
+          <form method="post" action="/account/tenants/${tenant.id}/delete" onsubmit="return confirm('Umgebung mit allen Daten, Sicherungen und dem Export jetzt endgültig löschen?')">
+            <button class="danger">Jetzt endgültig löschen</button>
+          </form>`
         : ''
     }
     ${
@@ -240,4 +289,56 @@ export function stopped(tenant: Tenant | null): Html {
     'Angehalten',
     'Diese Lenipo-Umgebung ist angehalten. Wer sie betreut, findet Export und Optionen im Kundenkonto.',
   );
+}
+
+const longDate = (value: Date) => value.toLocaleDateString('de-DE', { timeZone: 'UTC' });
+
+/** One version of a legal document; older and newer ones are linked below it (E-157). */
+export function legalDocument(
+  entry: LegalVersion,
+  current: LegalVersion,
+  all: LegalVersion[],
+  upcoming?: LegalVersion,
+): Html {
+  const others = all.filter((other) => other.version !== entry.version);
+  const state =
+    entry.version === current.version
+      ? 'gültig'
+      : entry.version < current.version
+        ? 'nicht mehr gültig'
+        : 'noch nicht gültig';
+  return html`<div class="card doc">
+    <h1>${entry.title}</h1>
+    <p class="muted">Fassung ${entry.version} vom ${longDate(entry.effective)}, ${state}${
+      entry.version !== current.version
+        ? html`. Gültig ist <a href="/${entry.document}">Fassung ${current.version}</a>.`
+        : ''
+    }</p>
+    ${
+      upcoming && entry.version === current.version
+        ? html`<p class="ok">Ab ${longDate(upcoming.effective)} gilt <a href="/${entry.document}/v/${upcoming.version}">Fassung ${upcoming.version}</a>.</p>`
+        : ''
+    }
+    ${markdown(entry.body)}
+    ${
+      others.length
+        ? html`<h2>Andere Fassungen</h2><ul>${others.map(
+            (other) =>
+              html`<li><a href="/${entry.document}/v/${other.version}">Fassung ${other.version} vom ${longDate(other.effective)}</a></li>`,
+          )}</ul>`
+        : ''
+    }
+  </div>`;
+}
+
+/** All legal documents with their versions in force. */
+export function legalIndex(entries: { current: LegalVersion; count: number }[]): Html {
+  return html`<div class="card doc">
+    <h1>Rechtliches</h1>
+    <p>Lenipo Cloud richtet sich an Unternehmen, Behörden und Vereine. Die Daten liegen ausschließlich in Rechenzentren in Deutschland.</p>
+    <ul>${entries.map(
+      ({ current, count }) =>
+        html`<li><a href="/${current.document}">${current.title}</a> <span class="muted">Fassung ${current.version} vom ${longDate(current.effective)}${count > 1 ? `, ${count} Fassungen` : ''}</span></li>`,
+    )}</ul>
+  </div>`;
 }

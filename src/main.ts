@@ -30,6 +30,9 @@ const cloud = new Cloud(
 );
 const app = await createServer(config, cloud);
 log = (text) => app.log.info(text);
+// Places in the legal documents someone still has to fill in, e.g. the mail provider (E-157).
+for (const item of cloud.compliance.openItems())
+  app.log.warn(`Legal document not complete: ${item}`);
 
 // The worker (E-156): JOB_WORKERS loops for jobs, never two of one instance at once, and the
 // minute for deadlines, health, backups and rollouts apart from them, so a long backup holds

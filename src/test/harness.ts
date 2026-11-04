@@ -8,6 +8,7 @@ import postgres from 'postgres';
 import { Cloud, type Resolver } from '../cloud.js';
 import { type Config, loadConfig } from '../config.js';
 import { createDatabase, type Database, migrateDatabase } from '../db/client.js';
+import { fileKey, openFile } from '../files.js';
 import { MemoryMailer } from '../mail.js';
 import { MemoryPayments } from '../payments.js';
 import { MemoryPlatform } from '../platform/memory.js';
@@ -119,6 +120,8 @@ export interface TestCloud {
   backupDir: string;
   payments: MemoryPayments;
   app: Awaited<ReturnType<typeof createServer>>;
+  /** The plain content of an encrypted backup or export (E-157). */
+  readPlain(file: string): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -174,6 +177,13 @@ export async function startTestCloud(overrides: Record<string, string> = {}): Pr
   const cloud = new Cloud(config, database, platform, mailer, payments, resolver, () => clock.now);
   const app = await createServer(config, cloud, false);
   return {
+    /** The plain content of an encrypted backup or export (E-157). */
+    async readPlain(file: string): Promise<string> {
+      const chunks: Buffer[] = [];
+      for await (const chunk of await openFile(file, fileKey(config.SECRET_KEY)))
+        chunks.push(chunk);
+      return Buffer.concat(chunks).toString('utf8');
+    },
     config,
     database,
     cloud,
