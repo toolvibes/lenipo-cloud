@@ -1,6 +1,7 @@
 import type { tenants } from '../db/schema.js';
 import type { DocumentKey, LegalVersion } from '../legal.js';
 import { PLAN_KEYS, PLANS, type PlanKey } from '../plans.js';
+import { type VatMode, vatSuffix } from '../vat.js';
 import { type Html, html } from './html.js';
 import { markdown } from './markdown.js';
 
@@ -111,6 +112,7 @@ export function account(
   contracts: ContractView[] = [],
   deletable = false,
   support?: { url: string | null; email: string },
+  vat: VatMode = 'small-business',
 ): Html {
   return html`<div class="card">
     <div class="row" style="justify-content:space-between">
@@ -121,7 +123,7 @@ export function account(
     ${notice?.ok ? html`<p class="ok" role="status">${notice.ok}</p>` : ''}
     ${notice?.error ? html`<p class="error" role="alert">${notice.error}</p>` : ''}
     ${list.length === 0 ? html`<p>Keine Umgebungen.</p>` : ''}
-    ${list.map((view) => tenantCard(view))}
+    ${list.map((view) => tenantCard(view, vat))}
     ${
       billing
         ? html`<form method="post" action="/account/billing"><button class="secondary">Zahlungsdaten und Rechnungen</button></form>`
@@ -163,13 +165,13 @@ const euro = (value: number) =>
   value.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
 
 /** Plan, interval and seats to book (trial or after it) or to change. */
-function planForm(view: TenantView, action: string, booked: boolean): Html {
+function planForm(view: TenantView, action: string, booked: boolean, vat: VatMode): Html {
   const { tenant, used } = view;
   const current = (tenant.plan ?? 'team') as PlanKey;
   const seats = Math.max(tenant.seats ?? used, used);
   return html`<form method="post" action="${action}">
     <fieldset style="border:0;padding:0;margin:0">
-      <legend class="muted" style="padding:0">Tarif, je Platz und Monat zzgl. USt.</legend>
+      <legend class="muted" style="padding:0">Tarif, je Platz und Monat ${vatSuffix(vat)}</legend>
       ${PLAN_KEYS.map((key) => {
         const plan = PLANS[key];
         return html`<label style="font-weight:400;display:flex;gap:8px;align-items:flex-start">
@@ -195,7 +197,7 @@ function planForm(view: TenantView, action: string, booked: boolean): Html {
   </form>`;
 }
 
-function tenantCard(view: TenantView): Html {
+function tenantCard(view: TenantView, vat: VatMode): Html {
   const { tenant, address, host } = view;
   const running = tenant.status === 'trial' || tenant.status === 'active';
   const bookable =
@@ -236,12 +238,12 @@ function tenantCard(view: TenantView): Html {
     }
     ${
       bookable
-        ? html`<h2>${tenant.status === 'trial' ? 'Tarif buchen' : 'Buchen und weiterarbeiten'}</h2>${planForm(view, `/account/tenants/${tenant.id}/checkout`, false)}`
+        ? html`<h2>${tenant.status === 'trial' ? 'Tarif buchen' : 'Buchen und weiterarbeiten'}</h2>${planForm(view, `/account/tenants/${tenant.id}/checkout`, false, vat)}`
         : ''
     }
     ${
       tenant.status === 'active' && plan && !tenant.cancelAt
-        ? html`<details><summary>Tarif oder Plätze ändern</summary>${planForm(view, `/account/tenants/${tenant.id}/plan`, true)}</details>`
+        ? html`<details><summary>Tarif oder Plätze ändern</summary>${planForm(view, `/account/tenants/${tenant.id}/plan`, true, vat)}</details>`
         : ''
     }
     ${

@@ -169,6 +169,7 @@ describe('plans and payment (TL-103)', () => {
     const account = await t.app.inject({ method: 'GET', url: '/account', headers: { cookie } });
     expect(account.body).toContain('Tarif Team, 5 Plätze (4 belegt), jährlich');
     expect(account.body).toContain('Zahlungsdaten und Rechnungen');
+    expect(account.body).toContain('je Platz und Monat ohne Umsatzsteuer (§ 19 UStG)');
     const portal = await post('/account/billing');
     expect(portal.headers.location).toBe(`https://billing.stripe.test/${subscription.customerId}`);
   });

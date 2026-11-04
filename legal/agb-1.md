@@ -25,7 +25,7 @@ effective: 2026-11-04
 
 ## 4. Preise, Plätze und Zahlung
 
-1. Es gelten die bei der Buchung angezeigten Preise je Platz und Monat zuzüglich der gesetzlichen Umsatzsteuer.
+1. Es gelten die bei der Buchung angezeigten Preise je Platz und Monat. Der Anbieter ist Kleinunternehmer im Sinne von § 19 UStG und berechnet keine Umsatzsteuer. Wird der Anbieter umsatzsteuerpflichtig, kommt zu den Preisen die gesetzliche Umsatzsteuer hinzu; der Anbieter kündigt das mindestens sechs Wochen vorher per E-Mail an.
 2. Plätze werden im Voraus gebucht. Jede aktive Person in der Umgebung belegt einen Platz; Gäste (externe Personen mit eingeschränkten Rechten) und KI-Agenten belegen keinen. Die Umgebung lässt nicht mehr aktive Personen zu, als Plätze gebucht sind.
 3. Mehr Plätze oder ein größerer Tarif gelten sofort und werden für den laufenden Zeitraum anteilig berechnet. Weniger Plätze oder ein kleinerer Tarif gelten ab dem nächsten Abrechnungszeitraum.
 4. Die Vergütung ist zu Beginn jedes Abrechnungszeitraums (Monat oder Jahr) im Voraus fällig. Die Zahlung wird über den Zahlungsdienstleister Stripe abgewickelt; Rechnungen stellt der Anbieter elektronisch bereit.

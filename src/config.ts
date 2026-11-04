@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { VAT_MODES } from './vat.js';
 
 /** Everything the service reads from its environment. */
 export const Config = z.object({
@@ -43,8 +44,11 @@ export const Config = z.object({
     .string()
     .default('{}')
     .transform((value) => z.record(z.string(), z.string()).parse(JSON.parse(value))),
-  /** Stripe Tax works out the VAT; needs it set up in the Stripe account. */
-  STRIPE_AUTOMATIC_TAX: z.stringbool().default(true),
+  /**
+   * VAT (see vat.ts): `small-business` (§ 19 UStG, no VAT, note on prices and checkout) or
+   * `standard` (plus VAT through Stripe Tax, which must be set up in the Stripe account).
+   */
+  VAT_MODE: z.enum(VAT_MODES).default('small-business'),
 
   /** Operations (E-156): where alerts go; without it they only show in `ops.js status`. */
   OPS_EMAIL: z.email().optional(),

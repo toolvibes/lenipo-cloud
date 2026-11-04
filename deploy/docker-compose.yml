@@ -55,7 +55,7 @@ services:
     logging: *logging
     command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]
     environment:
-      HETZNER_DNS_TOKEN: ${HETZNER_DNS_TOKEN:?}
+      HETZNER_DNS_TOKEN: ${HETZNER_DNS_TOKEN:-}
     ports: ["80:80", "443:443"]
     volumes:
       - ./caddy.json:/etc/caddy/caddy.json:ro

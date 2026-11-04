@@ -8,7 +8,7 @@ Diese Beschreibung gehört zu den [Allgemeinen Geschäftsbedingungen](/agb). Sie
 
 | | Testphase | Team | Business |
 | --- | --- | --- | --- |
-| Preis je Platz und Monat, netto | kostenlos, 30 Tage | 6 € monatlich, 5 € bei jährlicher Zahlung | 9 € monatlich, 7,50 € bei jährlicher Zahlung |
+| Preis je Platz und Monat, ohne Umsatzsteuer (§ 19 UStG) | kostenlos, 30 Tage | 6 € monatlich, 5 € bei jährlicher Zahlung | 9 € monatlich, 7,50 € bei jährlicher Zahlung |
 | Vorgänge, Boards, Sprints, Wiki, Berichte | ja | ja | ja |
 | Service Desk mit Kundenportal und E-Mail-Eingang | ja | nein | ja |
 | KI-Agenten | 5 | 2 | 20 |

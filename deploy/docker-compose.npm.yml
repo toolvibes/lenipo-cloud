@@ -1,0 +1,15 @@
+# TLS im Nginx Proxy Manager (Let's Encrypt) statt in Caddy:
+#   docker compose -f docker-compose.yml -f docker-compose.npm.yml up -d
+# Caddy verteilt dann nur intern über HTTP an Dienst und Instanzen; HETZNER_DNS_TOKEN entfällt.
+# Im NPM: Proxy Hosts für cloud.lenipo.de und *.lenipo.de auf http://<server>:${CADDY_HTTP_PORT},
+# WebSockets an, Zertifikat per Let's Encrypt (Wildcard per DNS-Challenge). Siehe README.
+services:
+  caddy:
+    image: caddy:2
+    command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]
+    environment: !reset {}
+    ports: !override
+      - "${CADDY_HTTP_PORT:-8088}:80"
+    volumes: !override
+      - ./caddy-npm.json:/etc/caddy/caddy.json:ro
+      - caddy:/data

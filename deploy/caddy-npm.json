@@ -1,0 +1,37 @@
+{
+  "admin": { "listen": "0.0.0.0:2019", "origins": ["caddy:2019"] },
+  "apps": {
+    "http": {
+      "servers": {
+        "srv0": {
+          "listen": [":80"],
+          "automatic_https": { "disable": true },
+          "trusted_proxies": {
+            "source": "static",
+            "ranges": [
+              "10.0.0.0/8",
+              "172.16.0.0/12",
+              "192.168.0.0/16",
+              "127.0.0.1/8",
+              "fd00::/8",
+              "::1"
+            ]
+          },
+          "routes": [
+            {
+              "@id": "cloud",
+              "match": [{ "host": ["cloud.lenipo.de"] }],
+              "handle": [{ "handler": "reverse_proxy", "upstreams": [{ "dial": "cloud:8080" }] }],
+              "terminal": true
+            },
+            {
+              "@id": "stopped",
+              "handle": [{ "handler": "reverse_proxy", "upstreams": [{ "dial": "cloud:8080" }] }],
+              "terminal": true
+            }
+          ]
+        }
+      }
+    }
+  }
+}

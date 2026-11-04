@@ -329,6 +329,7 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
       contracts,
       await cloud.compliance.canDelete(me.id),
       { url: config.SUPPORT_URL ?? null, email: config.SUPPORT_EMAIL },
+      config.VAT_MODE,
     );
   };
   const ERRORS: Record<string, string> = {

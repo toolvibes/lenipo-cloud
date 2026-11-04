@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { SMALL_BUSINESS_NOTE, type VatMode } from './vat.js';
 
 /** A subscription as far as Lenipo Cloud cares. */
 export interface Subscription {
@@ -99,7 +100,7 @@ export function fromStripe(object: StripeSubscription): Subscription {
 export class StripePayments implements Payments {
   constructor(
     private readonly secretKey: string,
-    private readonly automaticTax: boolean,
+    private readonly vatMode: VatMode,
   ) {}
 
   private async call<T>(method: 'GET' | 'POST', path: string, form?: Record<string, string>) {
@@ -132,10 +133,15 @@ export class StripePayments implements Payments {
       success_url: request.successUrl,
       cancel_url: request.cancelUrl,
       billing_address_collection: 'required',
-      'tax_id_collection[enabled]': 'true',
       locale: 'de',
     };
-    if (this.automaticTax) form['automatic_tax[enabled]'] = 'true';
+    if (this.vatMode === 'standard') {
+      form['automatic_tax[enabled]'] = 'true';
+      form['tax_id_collection[enabled]'] = 'true';
+    } else {
+      // No VAT: say so on the checkout page; the invoice footer is set in Stripe (README).
+      form['custom_text[submit][message]'] = SMALL_BUSINESS_NOTE;
+    }
     if (request.customerId) {
       form.customer = request.customerId;
       form['customer_update[address]'] = 'auto';

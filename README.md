@@ -26,12 +26,12 @@ Jobs laufen in einem Hintergrund-Loop im selben Prozess, jeder Schritt ist wiede
 
 - **Tarife** in `src/plans.ts`: `Team` und `Business` mit Preis je Platz und Monat (monatlich oder jährlich), Grenzen für Agenten, Speicher (Grundmenge plus je Platz), Service Desk und Module. Die angezeigten Beträge müssen zu den Preisen in Stripe passen; abgerechnet wird, was in Stripe steht (`STRIPE_PRICES` ordnet `plan:interval` einer Preis-ID zu).
 - **Plätze** werden im Voraus gebucht, mindestens so viele, wie Personen aktiv sind (Gäste und KI-Agenten zählen nicht). Die Instanz bekommt den Rahmen über `PUT /api/v1/provider/limits` mit ihrem `SETUP_TOKEN` und setzt ihn sofort durch; in der Testphase gilt `TRIAL_LIMITS`.
-- **Buchen** über Stripe Checkout (Adresse, USt.-ID, Stripe Tax). Stripe meldet das Abo über den Webhook `/stripe/webhook` (Ereignisse `checkout.session.completed`, `customer.subscription.created|updated|deleted`, `invoice.payment_failed`; Signatur mit `STRIPE_WEBHOOK_SECRET`). Eine angehaltene Instanz nach der Testphase kommt mit ihren Daten zurück.
+- **Buchen** über Stripe Checkout (Adresse; mit `VAT_MODE=standard` auch USt.-ID und Stripe Tax). Stripe meldet das Abo über den Webhook `/stripe/webhook` (Ereignisse `checkout.session.completed`, `customer.subscription.created|updated|deleted`, `invoice.payment_failed`; Signatur mit `STRIPE_WEBHOOK_SECRET`). Eine angehaltene Instanz nach der Testphase kommt mit ihren Daten zurück.
 - **Ändern** im Kundenkonto: mehr Plätze oder der größere Tarif werden sofort anteilig berechnet (`always_invoice`), weniger ohne Gutschrift ab dem nächsten Zeitraum. Zahlart, Rechnungsadresse und Rechnungen im Stripe-Kundenportal.
 - **Kündigen** wirkt zum Ende des bezahlten Zeitraums (in der Testphase sofort) und lässt sich bis dahin zurücknehmen. Endet das Abo bei Stripe (auch nach erfolglosen Zahlungsversuchen), wird die Instanz angehalten wie nach einer Kündigung.
 - **Nutzung**: einmal am Tag liest der Dienst `GET /api/v1/provider/usage` jeder laufenden Instanz und speichert Personen, Agenten und Speicher in `usage_samples`.
 
-In Stripe einzurichten: zwei Produkte mit je einem Monats- und einem Jahrespreis je Platz (Menge = Plätze), Stripe Tax, das Kundenportal (Zahlart, Rechnungen, Adresse; Kündigung und Tarifwechsel laufen über Lenipo Cloud) und ein Webhook auf `https://cloud.lenipo.de/stripe/webhook` mit den Ereignissen oben.
+In Stripe einzurichten: zwei Produkte mit je einem Monats- und einem Jahrespreis je Platz (Menge = Plätze), als Kleinunternehmer in den Rechnungseinstellungen die Standard-Fußzeile „Gemäß § 19 UStG wird keine Umsatzsteuer berechnet.“ (sonst Stripe Tax), das Kundenportal (Zahlart, Rechnungen, Adresse; Kündigung und Tarifwechsel laufen über Lenipo Cloud) und ein Webhook auf `https://cloud.lenipo.de/stripe/webhook` mit den Ereignissen oben.
 
 ## Betrieb vieler Instanzen (E-156)
 
@@ -105,7 +105,7 @@ Alle Werte stehen mit Beschreibung in `src/config.ts`; die wichtigsten:
 | `TENANT_SMTP_URL`, `TENANT_MAIL_FROM` | Mails der Instanzen selbst |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe; ohne Schlüssel laufen Zahlungen nur im Speicher (Entwicklung) |
 | `STRIPE_PRICES` | JSON, z. B. `{"team:month":"price_…","team:year":"price_…","business:month":"price_…","business:year":"price_…"}` |
-| `STRIPE_AUTOMATIC_TAX` | Stripe Tax für die Umsatzsteuer (Standard an) |
+| `VAT_MODE` | `small-business` (Standard): Kleinunternehmer nach § 19 UStG, keine Umsatzsteuer, Hinweis an Preisen und im Checkout; `standard`: zzgl. Umsatzsteuer über Stripe Tax mit Abfrage der USt.-ID |
 | `TRIAL_DAYS`, `RETENTION_DAYS` | Standard 30 und 30 |
 | `MAINTENANCE_WINDOW` | wöchentliches Wartungsfenster, Standard `tue 06:00-08:00` (deutsche Zeit); `always` nur für Entwicklung |
 | `SUPPORT_URL`, `SUPPORT_EMAIL` | Portal der Support-Instanz und Adresse (Standard support@lenipo.de) |
@@ -128,6 +128,12 @@ Die Tests legen je Lauf eine eigene Datenbank auf dem Server aus `DATABASE_URL` 
 ## Betrieb
 
 `deploy/` enthält ein Beispiel für einen Server: der Dienst, PostgreSQL 17 mit pgvector für die Instanzen und Caddy mit Wildcard-Zertifikat für `*.lenipo.de` (DNS-Challenge bei Hetzner, Caddy mit dem Modul `caddy-dns/hetzner` bauen) und On-Demand-TLS für eigene Domains (`/tls/ask` erlaubt nur bestätigte Domains). Neue Routen fügt der Dienst vor der Sammelroute ein, die angehaltene Adressen auf eine Hinweisseite des Dienstes lenkt.
+
+**TLS im Nginx Proxy Manager statt in Caddy:** `docker compose -f docker-compose.yml -f docker-compose.npm.yml up -d`. Caddy (Standard-Image, ohne DNS-Modul) hört dann nur auf HTTP (`CADDY_HTTP_PORT`, Standard 8088) mit `deploy/caddy-npm.json` und verteilt weiter nach Host an Dienst und Instanzen; `X-Forwarded-Proto` aus privaten Netzen wird durchgereicht, `HETZNER_DNS_TOKEN` entfällt. Im NPM:
+
+- Proxy Host `cloud.lenipo.de` und Proxy Host `*.lenipo.de` auf `http://<server>:8088`, jeweils **Websockets Support** an (gemeinsames Bearbeiten im Wiki).
+- Zertifikat per Let's Encrypt; für `*.lenipo.de` mit **DNS Challenge** (Wildcard geht nur so). Eigene Proxy Hosts wie `lenipo.de` und `www.lenipo.de` haben Vorrang vor dem Wildcard-Host.
+- **Eigene Domains der Kunden** bekommen hier kein Zertifikat von selbst: Nach „DNS prüfen“ im Kundenkonto je Domain einen Proxy Host im NPM mit Let's-Encrypt-Zertifikat auf dasselbe Ziel anlegen.
 
 ## Offen
 

@@ -19,7 +19,7 @@ const platform =
     : new MemoryPlatform((slug) => `http://localhost:4000/${slug}`);
 let log = (text: string) => console.log(text);
 const payments = config.STRIPE_SECRET_KEY
-  ? new StripePayments(config.STRIPE_SECRET_KEY, config.STRIPE_AUTOMATIC_TAX)
+  ? new StripePayments(config.STRIPE_SECRET_KEY, config.VAT_MODE)
   : new MemoryPayments();
 const cloud = new Cloud(
   config,

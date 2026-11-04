@@ -38,7 +38,7 @@ Nach der Anmeldung im Kundenkonto setzen wir ein Sitzungs-Cookie, das für die A
 
 - **Hetzner Online GmbH**, Industriestr. 25, 91710 Gunzenhausen: Rechenzentrum und Server in Deutschland, als Auftragsverarbeiter.
 - **E-Mail-Versand** [offen: E-Mail-Anbieter mit Sitz und Verarbeitung in der EU, vor dem Start eintragen]: Versand unserer E-Mails, als Auftragsverarbeiter.
-- **Stripe Payments Europe, Limited**, 1 Grand Canal Street Lower, Grand Canal Dock, Dublin, D02 H210, Irland: Bezahlung, Rechnungen und Berechnung der Umsatzsteuer, sobald Sie einen Tarif buchen. Sie geben Ihre Zahlungsdaten direkt bei Stripe ein; wir sehen sie nicht. Stripe verarbeitet die Daten auch als eigener Verantwortlicher und kann sie in die USA übermitteln, gestützt auf den Angemessenheitsbeschluss zum EU-US Data Privacy Framework und Standardvertragsklauseln. Näheres in der [Datenschutzerklärung von Stripe](https://stripe.com/de/privacy).
+- **Stripe Payments Europe, Limited**, 1 Grand Canal Street Lower, Grand Canal Dock, Dublin, D02 H210, Irland: Bezahlung und Rechnungen, sobald Sie einen Tarif buchen. Sie geben Ihre Zahlungsdaten direkt bei Stripe ein; wir sehen sie nicht. Stripe verarbeitet die Daten auch als eigener Verantwortlicher und kann sie in die USA übermitteln, gestützt auf den Angemessenheitsbeschluss zum EU-US Data Privacy Framework und Standardvertragsklauseln. Näheres in der [Datenschutzerklärung von Stripe](https://stripe.com/de/privacy).
 
 ## Ihre Rechte
 
