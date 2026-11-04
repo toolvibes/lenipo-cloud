@@ -1,6 +1,8 @@
 /** What the platform needs to know about an instance. */
 export interface Instance {
   slug: string;
+  /** The product image with the version of this instance (E-156). */
+  image: string;
   /** Hosts Caddy routes to the instance, the first is its public address. */
   hosts: string[];
   /** Environment of the container. */
@@ -28,6 +30,11 @@ export interface Platform {
   instanceUrl(slug: string): string;
   /** A backup of the instance as ZIP (the product's format) into the given file. */
   exportInstance(slug: string, file: string): Promise<void>;
+  /**
+   * Plays a backup into the running instance with its empty database (the product's
+   * restore-cli); the instance has to run the version that wrote the backup.
+   */
+  restoreInstance(slug: string, file: string): Promise<void>;
 }
 
 export const databaseName = (slug: string) => `t_${slug.replaceAll('-', '_')}`;

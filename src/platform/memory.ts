@@ -1,10 +1,13 @@
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import type { Instance, Platform } from './platform.js';
 
 interface State {
   database: boolean;
   container: 'running' | 'stopped' | null;
+  image: string | null;
   hosts: string[];
+  /** Backups played in, in order. */
+  restored: string[];
   env: Record<string, string>;
 }
 
@@ -22,7 +25,14 @@ export class MemoryPlatform implements Platform {
   private of(slug: string): State {
     const known = this.state.get(slug);
     if (known) return known;
-    const fresh: State = { database: false, container: null, hosts: [], env: {} };
+    const fresh: State = {
+      database: false,
+      container: null,
+      image: null,
+      hosts: [],
+      restored: [],
+      env: {},
+    };
     this.state.set(slug, fresh);
     return fresh;
   }
@@ -44,6 +54,7 @@ export class MemoryPlatform implements Platform {
     this.step('ensureInstance');
     const state = this.of(instance.slug);
     state.container = 'running';
+    state.image = instance.image;
     state.env = instance.env;
   }
 
@@ -58,7 +69,9 @@ export class MemoryPlatform implements Platform {
   }
 
   async removeInstance(slug: string) {
-    this.of(slug).container = null;
+    const state = this.of(slug);
+    state.container = null;
+    state.image = null;
   }
 
   async ensureRoute(instance: Instance) {
@@ -73,8 +86,18 @@ export class MemoryPlatform implements Platform {
     return this.url(slug);
   }
 
+  private exports = 0;
+
   async exportInstance(slug: string, file: string) {
     this.step('exportInstance');
-    await writeFile(file, `PK export of ${slug}`);
+    this.exports += 1;
+    await writeFile(file, `PK export of ${slug} #${this.exports}`);
+  }
+
+  async restoreInstance(slug: string, file: string) {
+    this.step('restoreInstance');
+    const state = this.of(slug);
+    if (state.container !== 'running') throw new Error(`${slug} does not run`);
+    state.restored.push(await readFile(file, 'utf8'));
   }
 }

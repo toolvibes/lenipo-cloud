@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   bigserial,
+  boolean,
   date,
   index,
   integer,
@@ -125,6 +127,18 @@ export const tenants = pgTable(
     periodEnd: timestamp({ withTimezone: true }),
     /** ok, or past_due while Stripe retries a failed payment. */
     paymentState: text(),
+    /** The product version (image tag) the instance runs (E-156); set when provisioned. */
+    version: text(),
+    /** Updated in the first wave of a rollout (own and test instances). */
+    canary: boolean().notNull().default(false),
+    /** Stopped because nobody used it in the trial; the first request wakes it. */
+    sleepingAt: timestamp({ withTimezone: true }),
+    /** The last time a person used the instance, from the daily reading. */
+    lastActiveAt: timestamp({ withTimezone: true }),
+    /** Failed readiness checks in a row, and since when the instance counts as down. */
+    healthFailures: integer().notNull().default(0),
+    healthyAt: timestamp({ withTimezone: true }),
+    downSince: timestamp({ withTimezone: true }),
     createdAt: created(),
     deletedAt: timestamp({ withTimezone: true }),
   },
@@ -149,6 +163,14 @@ export const JOB_KINDS = [
   'limits',
   /** Reads what the instance uses. */
   'usage',
+  /** A backup in the product's format (payload.kind: nightly, manual …). */
+  'backup',
+  /** Replaces the data with a backup (payload.backupId). */
+  'restore',
+  /** Moves the instance to another version (payload.version, payload.rolloutId). */
+  'update',
+  'sleep',
+  'wake',
 ] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 
@@ -161,7 +183,8 @@ export const jobs = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
     kind: text().$type<JobKind>().notNull(),
-    /** queued, done or failed. */
+    payload: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+    /** queued, running, done or failed. */
     status: text().notNull().default('queued'),
     attempts: integer().notNull().default(0),
     runAfter: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -213,4 +236,61 @@ export const usageSamples = pgTable(
     storageMb: real().notNull(),
   },
   (table) => [primaryKey({ columns: [table.tenantId, table.day] })],
+);
+
+export const BACKUP_KINDS = [
+  'nightly',
+  'manual',
+  'pre-update',
+  'pre-sleep',
+  'pre-restore',
+] as const;
+export type BackupKind = (typeof BACKUP_KINDS)[number];
+
+/** A backup of one instance in the product's format, a file in BACKUP_DIR (E-156). */
+export const backups = pgTable(
+  'backups',
+  {
+    id: uuid().primaryKey(),
+    tenantId: uuid()
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    kind: text().$type<BackupKind>().notNull(),
+    file: text().notNull(),
+    sizeBytes: bigint({ mode: 'number' }).notNull(),
+    /** The version that wrote it; a restore runs this version. */
+    version: text().notNull(),
+    createdAt: created(),
+  },
+  (table) => [index('backups_tenant_idx').on(table.tenantId, table.createdAt)],
+);
+
+/** Moving all instances to a version, wave by wave (E-156). */
+export const rollouts = pgTable('rollouts', {
+  id: uuid().primaryKey(),
+  version: text().notNull(),
+  /** Instances per wave after the first (the canaries, or three). */
+  waveSize: integer().notNull(),
+  waves: integer().notNull().default(0),
+  /** running, paused, done or cancelled. */
+  status: text().notNull(),
+  pauseReason: text(),
+  createdAt: created(),
+  finishedAt: timestamp({ withTimezone: true }),
+});
+
+/** Something the operator has to look at; one open alert per key. */
+export const opsAlerts = pgTable(
+  'ops_alerts',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    key: text().notNull(),
+    subject: text().notNull(),
+    text: text().notNull(),
+    openedAt: created(),
+    closedAt: timestamp({ withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex('ops_alerts_open_unique').on(table.key).where(sql`${table.closedAt} is null`),
+  ],
 );

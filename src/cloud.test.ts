@@ -228,7 +228,7 @@ describe('trial, export and deletion', () => {
     expect(t.platform.state.get('acme')).toMatchObject({ container: 'stopped', hosts: [] });
     const exported = await tenantBySlug('acme');
     expect(exported.exportFile).toMatch(/acme-.+\.zip$/);
-    expect(await readFile(exported.exportFile ?? '', 'utf8')).toBe('PK export of acme');
+    expect(await readFile(exported.exportFile ?? '', 'utf8')).toMatch(/^PK export of acme #\d+$/);
     expect(lastMailTo('clara@acme.example')?.subject).toBe('Lenipo: Ihr Export steht bereit');
     // Sessions last 14 days; sign in again by link.
     expect((await get('/account')).headers.location).toBe('/login');

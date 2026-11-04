@@ -154,6 +154,7 @@ describe('plans and payment (TL-103)', () => {
       storageMb: 10_000,
       modules: null,
       serviceDesk: false,
+      requestsPerMinute: { people: 600, tokens: 300, anonymous: 120 },
     });
     // The same message again changes nothing.
     await webhook('checkout.session.completed', { id: 'cs_1', subscription: subscription.id });

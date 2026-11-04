@@ -55,9 +55,12 @@ button.danger { color:var(--danger); background:transparent; border:1px solid va
 a { color:var(--accent); } code { font-size:13px; }
 `;
 
-export function page(title: string, body: Html): string {
+/** A whole page; `refresh` reloads it after that many seconds. */
+export function page(title: string, body: Html, refresh?: number): string {
   return `<!doctype html>
-<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${
+    refresh ? `<meta http-equiv="refresh" content="${refresh}">` : ''
+  }
 <title>${escapeHtml(title)} · Lenipo Cloud</title><style>${STYLE}</style></head>
 <body><main>${body.value}</main></body></html>`;
 }

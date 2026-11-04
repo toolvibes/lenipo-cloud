@@ -13,17 +13,31 @@ import { MemoryPayments } from '../payments.js';
 import { MemoryPlatform } from '../platform/memory.js';
 import { createServer } from '../server.js';
 
-/** Stands in for the API of the instances: health and setup by the provider. */
-async function fakeInstances() {
+/**
+ * Stands in for the API of the instances: health and setup by the provider. Readiness fails for
+ * slugs in `down` and for instances running a version in `broken`.
+ */
+async function fakeInstances(imageOf: (slug: string) => string | null) {
+  const down = new Set<string>();
+  const broken = new Set<string>();
   const provisioned = new Set<string>();
   const calls: Array<{ slug: string; body: unknown; token: string }> = [];
   const limits = new Map<string, unknown>();
-  const usage = new Map<string, { persons: number; agents: number; storageMb: number }>();
+  const usage = new Map<string, Usage>();
   const server: Server = createHttpServer((request, response) => {
     const [, slug, ...rest] = (request.url ?? '').split('/');
     const path = `/${rest.join('/')}`;
     if (path === '/api/v1/health/live') {
       response.writeHead(200).end('{"status":"ok"}');
+      return;
+    }
+    if (path === '/api/v1/health/ready') {
+      const version =
+        imageOf(slug ?? '')
+          ?.split(':')
+          .at(-1) ?? '';
+      const ok = !down.has(slug ?? '') && !broken.has(version);
+      response.writeHead(ok ? 200 : 503).end(ok ? '{"status":"ok"}' : '{"status":"down"}');
       return;
     }
     if (path === '/api/v1/provider/usage') {
@@ -74,8 +88,17 @@ async function fakeInstances() {
     calls,
     limits,
     usage,
+    down,
+    broken,
     url: (slug: string) => `http://127.0.0.1:${port}/${slug}`,
   };
+}
+
+export interface Usage {
+  persons: number;
+  agents: number;
+  storageMb: number;
+  lastActiveAt?: string | null;
 }
 
 export interface TestCloud {
@@ -89,14 +112,18 @@ export interface TestCloud {
   setupCalls: Array<{ slug: string; body: unknown; token: string }>;
   /** The frame each instance got, and what it reports as used. */
   limits: Map<string, unknown>;
-  usage: Map<string, { persons: number; agents: number; storageMb: number }>;
+  usage: Map<string, Usage>;
+  /** Instances whose readiness check fails, and versions that never get ready. */
+  down: Set<string>;
+  broken: Set<string>;
+  backupDir: string;
   payments: MemoryPayments;
   app: Awaited<ReturnType<typeof createServer>>;
   close(): Promise<void>;
 }
 
 /** A fresh database on the server of TEST_DATABASE_URL or DATABASE_URL, migrated. */
-export async function startTestCloud(): Promise<TestCloud> {
+export async function startTestCloud(overrides: Record<string, string> = {}): Promise<TestCloud> {
   const serverUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
   if (!serverUrl) throw new Error('Set DATABASE_URL to a PostgreSQL server for the tests');
   const name = `lenipo_cloud_test_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
@@ -105,6 +132,7 @@ export async function startTestCloud(): Promise<TestCloud> {
   const url = new URL(serverUrl);
   url.pathname = `/${name}`;
   const exports = await mkdtemp(join(tmpdir(), 'lenipo-cloud-exports-'));
+  const backupDir = await mkdtemp(join(tmpdir(), 'lenipo-cloud-backups-'));
   const config = loadConfig({
     DATABASE_URL: url.toString(),
     CLOUD_URL: 'https://cloud.lenipo.test',
@@ -112,6 +140,13 @@ export async function startTestCloud(): Promise<TestCloud> {
     SECRET_KEY: 'test-secret-key-0123456789abcdefghijklmn',
     PLATFORM: 'memory',
     EXPORT_DIR: exports,
+    BACKUP_DIR: backupDir,
+    LENIPO_IMAGE: 'ghcr.io/toolvibes/lenipo:1.0.0',
+    READY_TIMEOUT_SECONDS: '1',
+    // Sleeping is tested where it is meant; elsewhere instances stay awake.
+    SLEEP_AFTER_DAYS: '0',
+    OPS_EMAIL: 'betrieb@lenipo.test',
+    OPS_METRICS_TOKEN: 'metrics-token-0123456789abcdefghijklmnop',
     WORKER: 'false',
     STRIPE_WEBHOOK_SECRET: 'whsec_test',
     STRIPE_PRICES: JSON.stringify({
@@ -121,11 +156,13 @@ export async function startTestCloud(): Promise<TestCloud> {
       'business:year': 'price_business_year',
     }),
     LOG_LEVEL: 'fatal',
+    ...overrides,
   });
   const database = createDatabase(config.DATABASE_URL);
   await migrateDatabase(database);
-  const instances = await fakeInstances();
-  const platform = new MemoryPlatform(instances.url);
+  let platform: MemoryPlatform | null = null;
+  const instances = await fakeInstances((slug) => platform?.state.get(slug)?.image ?? null);
+  platform = new MemoryPlatform(instances.url);
   const mailer = new MemoryMailer();
   const dns = { cname: new Map<string, string[]>(), a: new Map<string, string[]>() };
   const resolver: Resolver = {
@@ -147,6 +184,9 @@ export async function startTestCloud(): Promise<TestCloud> {
     setupCalls: instances.calls,
     limits: instances.limits,
     usage: instances.usage,
+    down: instances.down,
+    broken: instances.broken,
+    backupDir,
     payments,
     app,
     async close() {
@@ -156,6 +196,7 @@ export async function startTestCloud(): Promise<TestCloud> {
       await admin.unsafe(`drop database if exists ${name} with (force)`);
       await admin.end({ timeout: 5 });
       await rm(exports, { recursive: true, force: true });
+      await rm(backupDir, { recursive: true, force: true });
     },
   };
 }

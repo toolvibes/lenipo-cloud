@@ -46,6 +46,25 @@ export const Config = z.object({
   /** Stripe Tax works out the VAT; needs it set up in the Stripe account. */
   STRIPE_AUTOMATIC_TAX: z.stringbool().default(true),
 
+  /** Operations (E-156): where alerts go; without it they only show in `ops.js status`. */
+  OPS_EMAIL: z.email().optional(),
+  /** Bearer token for /ops/metrics (Prometheus); without it the endpoint does not exist. */
+  OPS_METRICS_TOKEN: z.string().min(32).optional(),
+  /** Nightly backups of every instance, kept 7 days plus one a week for 4 weeks. */
+  BACKUP_DIR: z.string().default('/var/lib/lenipo-cloud/backups'),
+  /** From this hour (UTC) on, the nightly backups start. */
+  BACKUP_HOUR: z.coerce.number().int().min(0).max(23).default(1),
+  /** A trial instance nobody used for this many days sleeps until its next request; 0: never. */
+  SLEEP_AFTER_DAYS: z.coerce.number().int().min(0).default(7),
+  /** Memory of the server for instances; new sign-ups pause once it is taken. */
+  SERVER_MEMORY_MB: z.coerce.number().int().min(1024).default(49_152),
+  /** What the server costs a month, net, for the cost overview. */
+  SERVER_COST_EUR: z.coerce.number().min(0).default(0),
+  /** How long an instance may take to get ready after an update or restore. */
+  READY_TIMEOUT_SECONDS: z.coerce.number().int().min(1).default(300),
+  /** Instances run at once by the worker; never two jobs of one instance. */
+  JOB_WORKERS: z.coerce.number().int().min(1).max(8).default(2),
+
   TRIAL_DAYS: z.coerce.number().int().min(1).default(30),
   /** How long data stays after an instance was stopped (trial over, cancelled). */
   RETENTION_DAYS: z.coerce.number().int().min(1).default(30),

@@ -12,6 +12,7 @@ const config = loadConfig();
 const database = createDatabase(config.DATABASE_URL);
 await migrateDatabase(database);
 await mkdir(config.EXPORT_DIR, { recursive: true });
+await mkdir(config.BACKUP_DIR, { recursive: true });
 const platform =
   config.PLATFORM === 'docker'
     ? new DockerPlatform(config)
@@ -30,25 +31,30 @@ const cloud = new Cloud(
 const app = await createServer(config, cloud);
 log = (text) => app.log.info(text);
 
-// The worker: jobs every few seconds, deadlines and reminders every minute.
+// The worker (E-156): JOB_WORKERS loops for jobs, never two of one instance at once, and the
+// minute for deadlines, health, backups and rollouts apart from them, so a long backup holds
+// up nothing else.
 if (config.WORKER) {
-  let busy = false;
-  let lastTick = 0;
-  setInterval(async () => {
-    if (busy) return;
-    busy = true;
-    try {
-      await cloud.runJobs();
-      if (Date.now() - lastTick > 60_000) {
-        lastTick = Date.now();
-        await cloud.tick();
+  // A job that was running when the service stopped runs again.
+  await database.sql`update jobs set status = 'queued' where status = 'running'`;
+  const loop = (every: number, work: () => Promise<unknown>, label: string) => {
+    let busy = false;
+    setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        await work();
+      } catch (error) {
+        app.log.error(error, label);
+      } finally {
+        busy = false;
       }
-    } catch (error) {
-      app.log.error(error, 'Worker');
-    } finally {
-      busy = false;
-    }
-  }, 3000);
+    }, every);
+  };
+  for (let worker = 0; worker < config.JOB_WORKERS; worker += 1) {
+    loop(3000, () => cloud.runJobs(), 'Jobs');
+  }
+  loop(60_000, () => cloud.tick(), 'Tick');
 }
 
 await app.listen({ host: '0.0.0.0', port: config.PORT });

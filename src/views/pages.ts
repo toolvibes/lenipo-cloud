@@ -217,6 +217,14 @@ function tenantCard(view: TenantView): Html {
   </section>`;
 }
 
+/** A sleeping instance while it starts (E-156); the page reloads itself. */
+export function waking(): Html {
+  return message(
+    'Einen Moment',
+    'Diese Lenipo-Umgebung wurde eine Weile nicht genutzt und startet gerade. Die Seite lädt sich von selbst neu, sobald sie bereit ist; das dauert meist unter einer Minute.',
+  );
+}
+
 /** What a visitor sees at the address of an instance that does not run. */
 export function stopped(tenant: Tenant | null): Html {
   if (!tenant) {

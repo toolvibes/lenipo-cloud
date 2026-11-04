@@ -24,6 +24,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - exports:/var/lib/lenipo-cloud/exports
+      - backups:/var/lib/lenipo-cloud/backups
     networks: [lenipo]
     depends_on: [postgres, caddy]
 
@@ -54,6 +55,7 @@ services:
     networks: [lenipo]
 
 volumes:
+  backups:
   postgres:
   caddy:
   exports:

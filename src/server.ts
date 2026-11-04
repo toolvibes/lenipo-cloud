@@ -4,6 +4,7 @@ import formbody from '@fastify/formbody';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { type Cloud, CloudError } from './cloud.js';
 import type { Config } from './config.js';
+import { constantTimeEquals } from './secrets.js';
 import { page } from './views/html.js';
 import * as views from './views/pages.js';
 
@@ -39,6 +40,16 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
     if (!host || host === origin.hostname || request.url.startsWith('/tls/')) return;
     if (host === 'localhost' || host === '127.0.0.1') return;
     const tenant = await cloud.tenantByHost(host);
+    if (tenant?.sleepingAt && (tenant.status === 'trial' || tenant.status === 'active')) {
+      // A sleeping instance wakes on its first request (E-156).
+      await cloud.fleet.wake(tenant);
+      await reply
+        .code(503)
+        .header('retry-after', '5')
+        .type('text/html; charset=utf-8')
+        .send(page('Lenipo', views.waking(), 5));
+      return;
+    }
     await send(reply, 'Lenipo', views.stopped(tenant), tenant ? 503 : 404);
   });
 
@@ -75,6 +86,18 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
   };
 
   app.get('/health', async () => ({ ok: true }));
+
+  // For Prometheus (E-156), with OPS_METRICS_TOKEN; without it the endpoint does not exist.
+  app.get('/ops/metrics', async (request, reply) => {
+    const token = config.OPS_METRICS_TOKEN;
+    const given = (request.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+    if (!token) return reply.code(404).send();
+    if (!constantTimeEquals(given, token)) return reply.code(401).send();
+    return reply
+      .type('text/plain; version=0.0.4; charset=utf-8')
+      .header('cache-control', 'no-store')
+      .send(await cloud.fleet.metrics());
+  });
 
   app.get('/', async (_request, reply) => reply.redirect('/signup'));
 

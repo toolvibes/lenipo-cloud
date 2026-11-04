@@ -1,6 +1,6 @@
 # Lenipo Cloud
 
-Der private Steuerungsdienst für Lenipo als SaaS (Entscheidungen E-152, E-153 im internen Repository): Anmeldung, Bereitstellung, Testphase, Kündigung, Export und Löschung der Lenipo-Instanzen der Kunden. Das Produkt selbst liegt öffentlich in `toolvibes/lenipo`; hier liegt nur, was den gehosteten Betrieb ausmacht.
+Der private Steuerungsdienst für Lenipo als SaaS (Entscheidungen E-152 bis E-154 und E-156 im internen Repository): Anmeldung, Bereitstellung, Testphase, Tarife, Kündigung, Export und Löschung der Lenipo-Instanzen der Kunden, dazu ihr Betrieb: Updates in Wellen, Sicherungen, Schlafen, Überwachung, Kapazität und Kosten. Das Produkt selbst liegt öffentlich in `toolvibes/lenipo`; hier liegt nur, was den gehosteten Betrieb ausmacht.
 
 ## Modell
 
@@ -33,6 +33,35 @@ Jobs laufen in einem Hintergrund-Loop im selben Prozess, jeder Schritt ist wiede
 
 In Stripe einzurichten: zwei Produkte mit je einem Monats- und einem Jahrespreis je Platz (Menge = Plätze), Stripe Tax, das Kundenportal (Zahlart, Rechnungen, Adresse; Kündigung und Tarifwechsel laufen über Lenipo Cloud) und ein Webhook auf `https://cloud.lenipo.de/stripe/webhook` mit den Ereignissen oben.
 
+## Betrieb vieler Instanzen (E-156)
+
+Betreiber arbeiten mit der Kommandozeile im Container des Dienstes; sie liest und plant Arbeit ein, die der laufende Dienst erledigt:
+
+```bash
+docker compose exec cloud node dist/ops.js status
+```
+
+| Befehl | Wirkung |
+| --- | --- |
+| `status` | Instanzen je Status, Kapazität, Umsatz und Kosten, Rollout, ausgefallene Instanzen, offene Alarme |
+| `tenants` | jede Instanz mit Version, Zustand, Personen und letzter Sicherung (`*` = Kanarienvogel) |
+| `tenant <name>` | eine Instanz: Sicherungen, letzte Jobs, Ereignisse |
+| `canary <name> on\|off` | kommt in die erste Welle eines Rollouts (eigene und Test-Instanzen) |
+| `rollout start <version> [--wave <n>]`, `rollout status\|resume\|cancel` | eine neue Version ausrollen |
+| `backup <name>`, `restore <name> <sicherung> --yes` | Sicherung jetzt; Wiederherstellung (vorher wird der jetzige Stand gesichert) |
+| `sleep <name>`, `wake <name>` | Schlafen von Hand |
+| `retry <name>` | aufgegebene Jobs der Instanz neu starten |
+| `alerts` | offene Alarme mit Text |
+
+- **Versionen und Rollouts:** Jede Instanz läuft mit ihrer eigenen Version (Tag des Images aus `LENIPO_IMAGE`). Ein Rollout geht in Wellen: zuerst die Kanarienvögel (ohne sie drei Instanzen), danach Gruppen von `--wave` (Standard 10), die nächste Welle erst, wenn die vorige durch ist. Vor jedem Update eine Sicherung, danach muss `/api/v1/health/ready` antworten (`READY_TIMEOUT_SECONDS`). Wird eine Instanz nicht bereit, geht sie auf ihre Version zurück; startet die alte Version auf der migrierten Datenbank nicht, kommt die Sicherung von vor dem Update zurück. Der Rollout hält dann an und der Betreiber bekommt einen Alarm. Neue Instanzen starten mit der Version des letzten fertigen Rollouts; schlafende folgen beim Aufwachen.
+- **Sicherungen:** Ab `BACKUP_HOUR` (UTC) eine Sicherung je laufender Instanz am Tag im Format des Produkts (`backup-cli`) nach `BACKUP_DIR/<name>-<id>/`. Es bleiben die der letzten 7 Tage, eine je Woche für 4 Wochen, die übrigen Arten 14 Tage und von jeder Art die neueste. Die Wiederherstellung leert Instanz, Dateien und Datenbank, startet die Version, die die Sicherung schrieb, und spielt sie mit `restore-cli` ein. Mit der Instanz werden auch ihre Sicherungen gelöscht. `BACKUP_DIR` gehört zusätzlich an einen zweiten Standort gespiegelt (z. B. per `rclone` in eine Storage Box).
+- **Schlafen:** Eine Instanz in der Testphase, die `SLEEP_AFTER_DAYS` Tage niemand genutzt hat (Anmeldung, Browser, Token), wird nach einer Sicherung angehalten. Der erste Aufruf ihrer Adresse landet beim Dienst, zeigt eine Seite, die sich selbst neu lädt, und weckt sie. Bezahlte Instanzen schlafen nie; wer in der Schlafzeit bucht, weckt sie.
+- **Überwachung:** Jede Minute die Bereitschaft jeder laufenden Instanz; nach drei Fehlschlägen in Folge ein Alarm, beim nächsten Erfolg die Entwarnung. Alarme gibt es außerdem für aufgegebene Jobs, angehaltene Rollouts und Kapazität ab 80 %. Sie gehen per Mail an `OPS_EMAIL` und stehen in `ops.js status`; jeder Alarm einmal, bis er erledigt ist.
+- **Kennzahlen** für Prometheus unter `/ops/metrics` mit `Authorization: Bearer <OPS_METRICS_TOKEN>`: Instanzen je Status, schlafende, Kapazität, Umsatz, aufgegebene Jobs, offene Alarme und je Instanz Bereitschaft, Personen, Speicher, letzte Sicherung, Version.
+- **Kapazität und Kosten:** Laufende Instanzen × `INSTANCE_MEMORY_MB` gegen `SERVER_MEMORY_MB`; ab 80 % ein Alarm, ist kein Platz für eine weitere Instanz, nimmt die Anmeldung keine neuen Kunden an („ausgebucht“). `status` zeigt den Monatsumsatz der gebuchten Tarife, `SERVER_COST_EUR` und die Kosten je laufender Instanz. Mehrere Server kommen, wenn einer nicht mehr reicht.
+- **Anfragegrenzen:** Jeder Tarif setzt über die Grenzen der Instanz Obergrenzen für deren Rate-Limits (Anfragen je Minute je Person, je Token, ohne Anmeldung); Admins der Instanz können sie nur senken.
+- **Jobs** laufen in `JOB_WORKERS` Schleifen, nie zwei einer Instanz zugleich; Fristen, Prüfungen und Rollouts laufen jede Minute daneben.
+
 ## Konfiguration
 
 Alle Werte stehen mit Beschreibung in `src/config.ts`; die wichtigsten:
@@ -52,6 +81,11 @@ Alle Werte stehen mit Beschreibung in `src/config.ts`; die wichtigsten:
 | `STRIPE_PRICES` | JSON, z. B. `{"team:month":"price_…","team:year":"price_…","business:month":"price_…","business:year":"price_…"}` |
 | `STRIPE_AUTOMATIC_TAX` | Stripe Tax für die Umsatzsteuer (Standard an) |
 | `TRIAL_DAYS`, `RETENTION_DAYS` | Standard 30 und 30 |
+| `OPS_EMAIL`, `OPS_METRICS_TOKEN` | Alarme per Mail; Token für `/ops/metrics` (ohne ihn gibt es den Endpunkt nicht) |
+| `BACKUP_DIR`, `BACKUP_HOUR` | Sicherungen der Instanzen, ab welcher Stunde (UTC) |
+| `SLEEP_AFTER_DAYS` | Testphase ohne Nutzung bis zum Schlafen, Standard 7; 0 = nie |
+| `SERVER_MEMORY_MB`, `INSTANCE_MEMORY_MB`, `SERVER_COST_EUR` | Kapazität und Kosten des Servers |
+| `READY_TIMEOUT_SECONDS`, `JOB_WORKERS` | Wartezeit auf Bereitschaft nach Update oder Wiederherstellung (300); parallele Jobs (2) |
 
 ## Entwicklung
 
@@ -70,5 +104,6 @@ Die Tests legen je Lauf eine eigene Datenbank auf dem Server aus `DATABASE_URL` 
 ## Offen
 
 - Stripe-Konto, Preise und Webhook einrichten; die Preise in `src/plans.ts` sind Vorschläge.
-- Betrieb vieler Instanzen: Replikat und WAL-Archiv des Clusters, nächtliche Sicherungen je Kunde, rollierende Updates, Monitoring, Schlafen und Aufwecken.
+- Replikat und WAL-Archiv des PostgreSQL-Clusters, Spiegelung von `BACKUP_DIR` an einen zweiten Standort.
+- Mehrere Server (Tabelle der Server, Verteilung neuer Instanzen), wenn einer nicht mehr reicht.
 - Der Docker-Treiber ist per Smoke-Test (`node dist/smoke.js`) gegen Docker Desktop mit PostgreSQL, Caddy und dem Produkt-Image erprobt, noch nicht auf einem Server.

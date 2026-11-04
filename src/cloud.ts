@@ -17,6 +17,7 @@ import {
   tenants,
   usageSamples,
 } from './db/schema.js';
+import { Fleet, type Job } from './fleet.js';
 import type { Mailer } from './mail.js';
 import { fromStripe, type Payments, type Subscription, verifyStripeSignature } from './payments.js';
 import {
@@ -102,6 +103,9 @@ const systemResolver: Resolver = {
  * an instance from provisioning through trial, cancellation and export to deletion.
  */
 export class Cloud {
+  /** Versions, backups, sleep, health and capacity of all instances (E-156). */
+  readonly fleet: Fleet;
+
   constructor(
     private readonly config: Config,
     private readonly database: Database,
@@ -110,7 +114,19 @@ export class Cloud {
     private readonly payments: Payments,
     private readonly resolver: Resolver = systemResolver,
     private readonly now: () => Date = () => new Date(),
-  ) {}
+  ) {
+    this.fleet = new Fleet({
+      config,
+      database,
+      platform,
+      mailer,
+      now,
+      event: (tenantId, kind, details) => this.event(tenantId, kind, details),
+      enqueue: (tenantId, kind, payload) => this.enqueue(tenantId, kind, this.now(), payload),
+      instance: (tenant, version) => this.instance(tenant, version),
+      waitUntilLive: (base) => this.waitUntilLive(base),
+    });
+  }
 
   private get db() {
     return this.database.db;
@@ -182,6 +198,12 @@ export class Cloud {
     }
     const problem = await this.slugProblem(slug);
     if (problem) throw new CloudError(problem);
+    if ((await this.fleet.capacity()).full) {
+      throw new CloudError(
+        'Wir sind gerade ausgebucht und richten weitere Server ein. Bitte versuchen Sie es in ein paar Tagen erneut.',
+        503,
+      );
+    }
     const [recent] = await this.db
       .select({ count: sql<number>`count(*)::int` })
       .from(signups)
@@ -261,6 +283,7 @@ Ihr Lenipo-Team`,
         status: 'provisioning',
         secrets: encrypt(this.config.SECRET_KEY, secrets),
         trialEndsAt: new Date(this.now().getTime() + this.config.TRIAL_DAYS * DAY),
+        createdAt: this.now(),
       });
       await tx
         .insert(jobs)
@@ -638,7 +661,18 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
       },
     );
     if (!response.ok) throw new Error(`Usage: ${response.status} ${await response.text()}`);
-    const usage = (await response.json()) as { persons: number; agents: number; storageMb: number };
+    const usage = (await response.json()) as {
+      persons: number;
+      agents: number;
+      storageMb: number;
+      lastActiveAt?: string | null;
+    };
+    if (usage.lastActiveAt) {
+      await this.db
+        .update(tenants)
+        .set({ lastActiveAt: new Date(usage.lastActiveAt) })
+        .where(eq(tenants.id, tenant.id));
+    }
     const day = this.now().toISOString().slice(0, 10);
     const values = {
       persons: usage.persons,
@@ -729,15 +763,30 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
 
   // ---------------------------------------------------------------- lifecycle
 
-  private async enqueue(tenantId: string, kind: JobKind, runAfter = this.now()) {
-    await this.db.insert(jobs).values({ id: randomUUID(), tenantId, kind, runAfter });
+  private async enqueue(
+    tenantId: string,
+    kind: JobKind,
+    runAfter = this.now(),
+    payload: Record<string, unknown> = {},
+  ) {
+    await this.db
+      .insert(jobs)
+      .values({ id: randomUUID(), tenantId, kind, runAfter, payload, createdAt: this.now() });
   }
 
   private async suspend(tenant: TenantRow, reason: 'trial-ended' | 'cancelled') {
     const deleteAfter = new Date(this.now().getTime() + this.config.RETENTION_DAYS * DAY);
     await this.db
       .update(tenants)
-      .set({ status: 'suspended', suspendedAt: this.now(), suspendReason: reason, deleteAfter })
+      .set({
+        status: 'suspended',
+        suspendedAt: this.now(),
+        suspendReason: reason,
+        deleteAfter,
+        sleepingAt: null,
+        downSince: null,
+        healthFailures: 0,
+      })
       .where(eq(tenants.id, tenant.id));
     await this.event(tenant.id, 'suspended', { reason });
     await this.enqueue(tenant.id, 'suspend');
@@ -772,6 +821,7 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
       // Once a day: what the running instances use.
       if (
         (tenant.status === 'trial' || tenant.status === 'active') &&
+        !tenant.sleepingAt &&
         !counted.has(tenant.id) &&
         !waiting.has(tenant.id)
       ) {
@@ -825,6 +875,7 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
         }
       }
     }
+    await this.fleet.tick();
   }
 
   /** Runs waiting jobs until none is due; returns how many ran. */
@@ -832,28 +883,32 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
     let ran = 0;
     for (;;) {
       const job = await this.database.db.transaction(async (tx) => {
+        // Never two jobs of one instance at once: none running, and the instance's lock is free.
         const [next] = await tx
           .select()
           .from(jobs)
-          .where(and(eq(jobs.status, 'queued'), lte(jobs.runAfter, this.now())))
-          .orderBy(jobs.runAfter)
+          .where(
+            and(
+              eq(jobs.status, 'queued'),
+              lte(jobs.runAfter, this.now()),
+              sql`not exists (select 1 from jobs running where running.tenant_id = ${jobs.tenantId} and running.status = 'running')`,
+              sql`pg_try_advisory_xact_lock(hashtext(${jobs.tenantId}::text))`,
+            ),
+          )
+          .orderBy(jobs.runAfter, jobs.createdAt)
           .limit(1)
           .for('update', { skipLocked: true });
         if (!next) return null;
-        // Taken: a crash leaves it to be tried again in five minutes.
         await tx
           .update(jobs)
-          .set({
-            attempts: next.attempts + 1,
-            runAfter: new Date(this.now().getTime() + 5 * 60_000),
-          })
+          .set({ attempts: next.attempts + 1, status: 'running' })
           .where(eq(jobs.id, next.id));
         return { ...next, attempts: next.attempts + 1 };
       });
       if (!job) return ran;
       ran += 1;
       try {
-        await this.run(job.kind, job.tenantId);
+        await this.run(job);
         await this.db
           .update(jobs)
           .set({ status: 'done', finishedAt: this.now(), lastError: null })
@@ -877,6 +932,16 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
             .set({ status: 'failed' })
             .where(eq(tenants.id, job.tenantId));
         }
+        if (final) {
+          const tenant = await this.load(job.tenantId);
+          await this.fleet.alert(
+            `job:${job.id}`,
+            `Job ${job.kind} für ${tenant.slug} aufgegeben`,
+            `Nach ${job.attempts} Versuchen: ${message}
+
+Nachsehen: ops.js tenant ${tenant.slug}; neu versuchen: ops.js retry ${tenant.slug}`,
+          );
+        }
       }
     }
   }
@@ -888,7 +953,7 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
   }
 
   /** What the platform needs: hosts, environment and the database password. */
-  instance(tenant: TenantRow): Instance {
+  instance(tenant: TenantRow, version = this.fleet.versionOf(tenant)): Instance {
     const secrets = decrypt<TenantSecrets>(this.config.SECRET_KEY, tenant.secrets);
     const name = databaseName(tenant.slug);
     const custom =
@@ -896,6 +961,7 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
     const database = `postgres://${name}:${encodeURIComponent(secrets.databasePassword)}@${this.config.TENANT_DATABASE_HOST}/${name}`;
     return {
       slug: tenant.slug,
+      image: this.fleet.imageOf(version),
       hosts: custom ? [custom, this.host(tenant)] : [this.host(tenant)],
       databasePassword: secrets.databasePassword,
       env: {
@@ -909,15 +975,23 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
     };
   }
 
-  private async run(kind: JobKind, tenantId: string) {
-    const tenant = await this.load(tenantId);
+  private async run(job: Job & { tenantId: string }) {
+    let tenant = await this.load(job.tenantId);
     // Deleted instances have no secrets left; only steps that need them decrypt.
     const instance = () => this.instance(tenant);
-    switch (kind) {
+    switch (job.kind) {
       case 'provision':
+        if (!tenant.version) {
+          // New instances start with the version of the last finished rollout.
+          const version = await this.fleet.currentVersion();
+          await this.db.update(tenants).set({ version }).where(eq(tenants.id, tenant.id));
+          tenant = { ...tenant, version };
+        }
         return this.provision(tenant, instance());
       case 'route':
+        // A sleeping instance gets its hosts when it wakes.
         if (tenant.status !== 'trial' && tenant.status !== 'active') return;
+        if (tenant.sleepingAt) return;
         await this.platform.ensureInstance(instance());
         await this.platform.ensureRoute(instance());
         return;
@@ -932,14 +1006,22 @@ Ihr Konto: ${this.config.CLOUD_URL}/account`,
         return;
       case 'limits':
         if (tenant.status !== 'trial' && tenant.status !== 'active') return;
+        // A plan booked during sleep: the instance wakes up for it.
+        if (tenant.sleepingAt) {
+          await this.fleet.wakeUp(tenant);
+          tenant = await this.load(tenant.id);
+        }
         return this.pushLimits(tenant);
       case 'usage':
         if (tenant.status !== 'trial' && tenant.status !== 'active') return;
+        if (tenant.sleepingAt) return;
         return this.readUsage(tenant);
       case 'export':
         return this.export(tenant);
       case 'delete':
         return this.remove(tenant);
+      default:
+        return this.fleet.runJob(job, tenant);
     }
   }
 
@@ -1045,11 +1127,12 @@ Am ${tenant.deleteAfter?.toLocaleDateString('de-DE') ?? '–'} löschen wir Ihre
     await this.platform.removeInstance(tenant.slug);
     await this.platform.dropDatabase(tenant.slug);
     if (tenant.exportFile) await rm(tenant.exportFile, { force: true });
+    await this.fleet.removeBackups(tenant);
     await this.noticeOnce(
       tenant,
       'deleted',
       'Lenipo: Ihre Daten sind gelöscht',
-      `Wie angekündigt haben wir ${this.address(tenant)} mit allen Daten und dem Export gelöscht. Sicherungen laufen innerhalb ihrer Frist aus. Danke, dass Sie Lenipo ausprobiert haben.`,
+      `Wie angekündigt haben wir ${this.address(tenant)} mit allen Daten, Sicherungen und dem Export gelöscht. Danke, dass Sie Lenipo ausprobiert haben.`,
     );
     await this.db
       .update(tenants)

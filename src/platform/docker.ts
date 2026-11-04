@@ -1,4 +1,6 @@
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import postgres from 'postgres';
 import { Client, request } from 'undici';
@@ -10,10 +12,12 @@ import {
   type Platform,
   volumeName,
 } from './platform.js';
-import { extractSingleFile } from './tar.js';
+import { extractSingleFile, packSingleFile } from './tar.js';
 
 const MOUNT = '/var/lib/lenipo/files';
 const EXPORT_PATH = '/tmp/lenipo-export.zip';
+const RESTORE_DIR = '/tmp';
+const RESTORE_NAME = 'lenipo-restore.zip';
 
 /** Quotes an SQL identifier; names here come from validated slugs only. */
 const ident = (name: string) => `"${name.replaceAll('"', '""')}"`;
@@ -102,8 +106,7 @@ export class DockerPlatform implements Platform {
     }
   }
 
-  private async ensureImage() {
-    const image = this.config.LENIPO_IMAGE;
+  private async ensureImage(image: string) {
     const found = await this.api(
       'GET',
       `/images/${encodeURIComponent(image)}/json`,
@@ -121,13 +124,13 @@ export class DockerPlatform implements Platform {
 
   async ensureInstance(instance: Instance) {
     await this.ensureNetwork();
-    await this.ensureImage();
+    await this.ensureImage(instance.image);
     const name = containerName(instance.slug);
     const env = Object.entries(instance.env)
       .map(([key, value]) => `${key}=${value}`)
       .sort();
     // A changed environment or image needs a new container; the files stay in the volume.
-    const signature = JSON.stringify([this.config.LENIPO_IMAGE, env]);
+    const signature = JSON.stringify([instance.image, env]);
     const existing = await this.api('GET', `/containers/${name}/json`, undefined, [404]);
     if (existing.status !== 404) {
       const labels = (existing.json as { Config?: { Labels?: Record<string, string> } }).Config
@@ -140,7 +143,7 @@ export class DockerPlatform implements Platform {
     }
     await this.api('POST', '/volumes/create', { Name: volumeName(instance.slug) });
     await this.api('POST', `/containers/create?name=${name}`, {
-      Image: this.config.LENIPO_IMAGE,
+      Image: instance.image,
       Env: env,
       Labels: {
         'lenipo.tenant': instance.slug,
@@ -220,11 +223,11 @@ export class DockerPlatform implements Platform {
     return `http://${containerName(slug)}:4000`;
   }
 
-  async exportInstance(slug: string, file: string) {
-    const name = containerName(slug);
-    await this.startInstance(slug);
-    const exec = await this.api('POST', `/containers/${name}/exec`, {
-      Cmd: ['node', 'api/dist/maintenance/backup-cli.js', '--out', EXPORT_PATH],
+  /** Runs a command in the container and waits for it; fails unless it exits with 0. */
+  private async exec(slug: string, command: string[], what: string, user?: string) {
+    const exec = await this.api('POST', `/containers/${containerName(slug)}/exec`, {
+      Cmd: command,
+      ...(user ? { User: user } : {}),
       AttachStdout: false,
       AttachStderr: false,
     });
@@ -236,11 +239,21 @@ export class DockerPlatform implements Platform {
         ExitCode: number | null;
       };
       if (!state.Running) {
-        if (state.ExitCode !== 0) throw new Error(`The backup ended with ${state.ExitCode}`);
-        break;
+        if (state.ExitCode !== 0) throw new Error(`${what} ended with ${state.ExitCode}`);
+        return;
       }
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
+  }
+
+  async exportInstance(slug: string, file: string) {
+    const name = containerName(slug);
+    await this.startInstance(slug);
+    await this.exec(
+      slug,
+      ['node', 'api/dist/maintenance/backup-cli.js', '--out', EXPORT_PATH],
+      'The backup',
+    );
     // The file comes back as a tar archive with one entry.
     const response = await this.docker.request({
       method: 'GET',
@@ -250,5 +263,28 @@ export class DockerPlatform implements Platform {
       throw new Error(`Docker archive: ${response.statusCode} ${await response.body.text()}`);
     }
     await pipeline(response.body, extractSingleFile(), createWriteStream(file));
+  }
+
+  async restoreInstance(slug: string, file: string) {
+    const name = containerName(slug);
+    const { size } = await stat(file);
+    // Files go into a container as a tar archive.
+    const upload = await this.docker.request({
+      method: 'PUT',
+      path: `/v1.43/containers/${name}/archive?path=${encodeURIComponent(RESTORE_DIR)}`,
+      headers: { 'content-type': 'application/x-tar' },
+      body: Readable.from(packSingleFile(RESTORE_NAME, size, createReadStream(file))),
+    });
+    const answer = await upload.body.text();
+    if (upload.statusCode !== 200) {
+      throw new Error(`Docker archive upload: ${upload.statusCode} ${answer.slice(0, 300)}`);
+    }
+    await this.exec(
+      slug,
+      ['node', 'api/dist/maintenance/restore-cli.js', '--in', `${RESTORE_DIR}/${RESTORE_NAME}`],
+      'The restore',
+    );
+    // Uploaded archives belong to root; the instance runs as its own user.
+    await this.exec(slug, ['rm', '-f', `${RESTORE_DIR}/${RESTORE_NAME}`], 'Cleaning up', '0');
   }
 }

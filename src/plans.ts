@@ -17,6 +17,8 @@ export interface Plan {
   /** Storage for attachments: a base plus an amount per seat. */
   storageMb: { base: number; perSeat: number };
   serviceDesk: boolean;
+  /** Ceilings for the request limits of the instance, per minute (E-156). */
+  requestsPerMinute: { people: number; tokens: number; anonymous: number };
   /** Modules of the product; null: all. */
   modules: string[] | null;
   features: string[];
@@ -30,6 +32,7 @@ export const PLANS: Record<PlanKey, Plan> = {
     agents: 2,
     storageMb: { base: 5_000, perSeat: 1_000 },
     serviceDesk: false,
+    requestsPerMinute: { people: 600, tokens: 300, anonymous: 120 },
     modules: null,
     features: [
       'Vorgänge, Boards, Sprints, Wiki',
@@ -44,6 +47,7 @@ export const PLANS: Record<PlanKey, Plan> = {
     agents: 20,
     storageMb: { base: 20_000, perSeat: 2_000 },
     serviceDesk: true,
+    requestsPerMinute: { people: 1_200, tokens: 1_000, anonymous: 240 },
     modules: null,
     features: [
       'Alles aus Team',
@@ -62,6 +66,7 @@ export const TRIAL_LIMITS = {
   storageMb: 10_000,
   modules: null,
   serviceDesk: true,
+  requestsPerMinute: { people: 600, tokens: 300, anonymous: 60 },
 };
 
 /** The frame the instance enforces (the product's ProviderLimits). */
@@ -73,6 +78,7 @@ export function limitsOf(plan: Plan, seats: number) {
     storageMb: plan.storageMb.base + plan.storageMb.perSeat * seats,
     modules: plan.modules,
     serviceDesk: plan.serviceDesk,
+    requestsPerMinute: plan.requestsPerMinute,
   };
 }
 

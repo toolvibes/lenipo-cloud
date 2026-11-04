@@ -9,7 +9,8 @@ import { randomToken } from './secrets.js';
 
 /**
  * Smoke test of the Docker platform against a real Docker, PostgreSQL and Caddy:
- * database, container, route, setup by token, export, removal. Reads the normal configuration
+ * database, container, route, setup by token, export, restore into an emptied instance, removal.
+ * Reads the normal configuration
  * plus SMOKE_GATEWAY (where Caddy listens, e.g. http://localhost:8088) and SMOKE_SLUG.
  *   node dist/smoke.js
  */
@@ -23,6 +24,7 @@ const password = randomToken(24);
 const name = `t_${slug.replaceAll('-', '_')}`;
 const instance: Instance = {
   slug,
+  image: config.LENIPO_IMAGE,
   hosts: [host],
   databasePassword: password,
   env: {
@@ -66,15 +68,16 @@ try {
   await step('container', () => platform.ensureInstance(instance));
   await step('same container again (no change)', () => platform.ensureInstance(instance));
   await step('route in Caddy', () => platform.ensureRoute(instance));
-  await step('instance answers through Caddy', async () => {
+  const answers = async () => {
     const until = Date.now() + 180_000;
     for (;;) {
-      const response = await viaCaddy('/api/v1/health/live').catch(() => null);
+      const response = await viaCaddy('/api/v1/health/ready').catch(() => null);
       if (response?.ok) return;
       if (Date.now() > until) throw new Error('No answer within three minutes');
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
-  });
+  };
+  await step('instance answers through Caddy', answers);
   const link = await step('setup by token', async () => {
     const response = await viaCaddy('/api/v1/setup/provision', {
       method: 'POST',
@@ -85,11 +88,41 @@ try {
     return ((await response.json()) as { link: string }).link;
   });
   console.log(`    ${link}`);
+  await step('first administrator accepts', async () => {
+    const response = await viaCaddy('/api/v1/invitations/accept', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        token: new URL(link).searchParams.get('token'),
+        displayName: 'Smoke',
+        password: randomToken(16),
+      }),
+    });
+    if (response.status !== 200) throw new Error(`${response.status} ${await response.text()}`);
+  });
+  const setupRequired = async () =>
+    ((await (await viaCaddy('/api/v1/setup/status')).json()) as { required: boolean }).required;
   const file = join(dir, 'export.zip');
   await step('export', () => platform.exportInstance(slug, file));
   const zip = await readFile(file);
   if (zip.subarray(0, 2).toString() !== 'PK') throw new Error('The export is no ZIP');
   console.log(`    ${zip.length} bytes`);
+  // A restore as Lenipo Cloud does it: everything emptied, then the backup played in.
+  await step('empty the instance', async () => {
+    await platform.removeInstance(slug);
+    await platform.dropDatabase(slug);
+    await platform.ensureDatabase(instance);
+    await platform.ensureInstance(instance);
+  });
+  await step('fresh instance answers', async () => {
+    await answers();
+    if (!(await setupRequired())) throw new Error('The emptied instance is still set up');
+  });
+  await step('restore the export', () => platform.restoreInstance(slug, file));
+  await step('restored instance has its administrator', async () => {
+    await answers();
+    if (await setupRequired()) throw new Error('The restore brought no administrator back');
+  });
   await step('stop', () => platform.stopInstance(slug));
 } finally {
   // SMOKE_KEEP=1 leaves everything standing, e.g. to read the container's log.
