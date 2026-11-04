@@ -38,6 +38,7 @@ export const PLANS: Record<PlanKey, Plan> = {
       'Vorgänge, Boards, Sprints, Wiki',
       '2 KI-Agenten',
       '5 GB Speicher plus 1 GB je Platz',
+      '99,5 % Verfügbarkeit, Support bis zum nächsten Werktag',
     ],
   },
   business: {
@@ -54,6 +55,7 @@ export const PLANS: Record<PlanKey, Plan> = {
       'Service Desk mit Kundenportal',
       '20 KI-Agenten',
       '20 GB Speicher plus 2 GB je Platz',
+      'Support innerhalb von 4 Geschäftsstunden',
     ],
   },
 };

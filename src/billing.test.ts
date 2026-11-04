@@ -85,7 +85,11 @@ afterAll(async () => {
 describe('plans and payment (TL-103)', () => {
   it('gives the trial its frame and counts what is used', async () => {
     const firma = await signUp('anna@firma.example', 'firma');
-    expect(t.limits.get('firma')).toEqual(TRIAL_LIMITS);
+    // Support is the address of the service until a portal is configured (TL-106).
+    expect(t.limits.get('firma')).toEqual({
+      ...TRIAL_LIMITS,
+      supportUrl: 'mailto:support@lenipo.de',
+    });
     t.usage.set('firma', { persons: 4, agents: 1, storageMb: 120 });
     await t.cloud.tick();
     await t.cloud.runJobs();
@@ -155,6 +159,7 @@ describe('plans and payment (TL-103)', () => {
       modules: null,
       serviceDesk: false,
       requestsPerMinute: { people: 600, tokens: 300, anonymous: 120 },
+      supportUrl: 'mailto:support@lenipo.de',
     });
     // The same message again changes nothing.
     await webhook('checkout.session.completed', { id: 'cs_1', subscription: subscription.id });

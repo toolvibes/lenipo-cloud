@@ -1,6 +1,6 @@
 # Lenipo Cloud
 
-Der private Steuerungsdienst für Lenipo als SaaS (Entscheidungen E-152 bis E-154, E-156 und E-157 im internen Repository): Anmeldung, Bereitstellung, Testphase, Tarife, Kündigung, Export und Löschung der Lenipo-Instanzen der Kunden, dazu ihr Betrieb: Updates in Wellen, Sicherungen, Schlafen, Überwachung, Kapazität und Kosten. Das Produkt selbst liegt öffentlich in `toolvibes/lenipo`; hier liegt nur, was den gehosteten Betrieb ausmacht.
+Der private Steuerungsdienst für Lenipo als SaaS (Entscheidungen E-152 bis E-154 und E-156 bis E-158 im internen Repository): Anmeldung, Bereitstellung, Testphase, Tarife, Kündigung, Export und Löschung der Lenipo-Instanzen der Kunden, dazu ihr Betrieb: Updates in Wellen, Sicherungen, Schlafen, Überwachung, Kapazität und Kosten. Das Produkt selbst liegt öffentlich in `toolvibes/lenipo`; hier liegt nur, was den gehosteten Betrieb ausmacht.
 
 ## Modell
 
@@ -47,11 +47,16 @@ docker compose exec cloud node dist/ops.js status
 | `tenants` | jede Instanz mit Version, Zustand, Personen und letzter Sicherung (`*` = Kanarienvogel) |
 | `tenant <name>` | eine Instanz: Sicherungen, letzte Jobs, Ereignisse |
 | `canary <name> on\|off` | kommt in die erste Welle eines Rollouts (eigene und Test-Instanzen) |
-| `rollout start <version> [--wave <n>]`, `rollout status\|resume\|cancel` | eine neue Version ausrollen |
+| `rollout start <version> [--wave <n>] [--now]`, `rollout status\|resume\|cancel` | eine neue Version ausrollen; Wellen nur im Wartungsfenster, `--now` für Sicherheitsupdates |
 | `backup <name>`, `restore <name> <sicherung> --yes` | Sicherung jetzt; Wiederherstellung (vorher wird der jetzige Stand gesichert) |
 | `sleep <name>`, `wake <name>` | Schlafen von Hand |
 | `retry <name>` | aufgegebene Jobs der Instanz neu starten |
 | `alerts` | offene Alarme mit Text |
+| `incidents` | offene Störungen und geplante Wartungen |
+| `incident open <titel> <text>`, `incident update <id> <text>`, `incident resolve <id> [<text>]` | Störung auf der Statusseite |
+| `maintenance plan <start> <minuten> <titel> [--urgent]`, `maintenance cancel <id>` | Wartung ankündigen (Start „JJJJ-MM-TT HH:MM“ deutsche Zeit, mindestens 3 Tage vorher) |
+| `availability <name> [JJJJ-MM]` | Verfügbarkeit einer Instanz im Monat, gegen 99,5 % |
+| `internal <name> on\|off` | Instanz des Betreibers (Support): ohne Testphasen-Ende, Schlaf und Grenzen |
 | `legal status` | gültige und angekündigte Fassungen der Rechtstexte, noch auszufüllende Stellen |
 | `legal announce <dokument> <n>` | gibt Fassung n aus `legal/` für ihr Datum frei und schreibt den Kunden |
 | `legal accepted <e-mail>` | was ein Kunde wann und von wo angenommen hat |
@@ -65,10 +70,18 @@ docker compose exec cloud node dist/ops.js status
 - **Anfragegrenzen:** Jeder Tarif setzt über die Grenzen der Instanz Obergrenzen für deren Rate-Limits (Anfragen je Minute je Person, je Token, ohne Anmeldung); Admins der Instanz können sie nur senken.
 - **Jobs** laufen in `JOB_WORKERS` Schleifen, nie zwei einer Instanz zugleich; Fristen, Prüfungen und Rollouts laufen jede Minute daneben.
 
+## Status, Support und Verfügbarkeit (E-158)
+
+- **Statusseite** unter `/status` (lädt sich jede Minute neu) und als JSON unter `/status.json` (CORS offen): Gesamtzustand, bereite Umgebungen, laufende Störungen und Wartungen, geplante Wartungen, Verfügbarkeit der letzten 90 Tage, vergangene Störungen. Die Landingpage hat unter `status.html` eine eigene Statusseite auf ihrem Server, die das JSON lädt und „Status nicht erreichbar“ zeigt, wenn die Cloud nicht antwortet.
+- **Störungen** trägt der Betreiber mit `ops.js incident` ein. Fallen viele Instanzen zugleich aus (mindestens drei bzw. 20 %, bei weniger Instanzen alle), öffnet der Dienst selbst eine Störung und schließt sie, wenn alle wieder antworten.
+- **Wartung:** festes Fenster `MAINTENANCE_WINDOW` (Standard dienstags 06:00–08:00 deutscher Zeit); Rollout-Wellen starten nur darin, außer mit `--now`. Andere Wartungen mit `ops.js maintenance plan` mindestens 3 Tage vorher; die Instanzen zeigen ab 3 Tagen vorher einen „Hinweis des Anbieters“ (Produkt: `PUT /provider/notice`).
+- **Verfügbarkeit:** Die minütliche Prüfung zählt je Instanz und Tag geprüfte und fehlgeschlagene Minuten; Minuten im Wartungsfenster und in mindestens 3 Tage vorher angekündigten Wartungen zählen nicht, schlafende Instanzen werden nicht geprüft. Das Kundenkonto zeigt den laufenden und letzten Monat; unter 99,5 % gibt es auf Antrag eine Gutschrift (`ops.js availability`, Gutschrift von Hand in Stripe). Zusagen und Antwortzeiten stehen in `legal/leistungsbeschreibung-1.md`.
+- **Support:** eine eigene Lenipo-Instanz mit Service Desk (Portal und E-Mail-Eingang an `SUPPORT_EMAIL`). Einrichten: wie ein Kunde anmelden (z. B. Adresse `servicedesk`), `ops.js internal servicedesk on` und `ops.js canary servicedesk on`, im Service Desk den E-Mail-Eingang für support@lenipo.de einrichten und `SUPPORT_URL` auf das Portal setzen. Jede Instanz bekommt den Link mit ihren Grenzen und zeigt ihn als „Support kontaktieren“; das Kundenkonto und die Statusseite nennen ihn ebenfalls.
+
 ## Recht und Datenschutz (E-157)
 
 - **Nur für Unternehmen:** Die Anmeldung verlangt die Bestätigung, für ein Unternehmen, eine Behörde oder einen Verein zu handeln, und die Zustimmung zu AGB und Auftragsverarbeitungsvertrag mit Anlagen. Gespeichert werden Dokument, Fassung, Zeitpunkt und IP-Adresse (`acceptances`); das Kundenkonto zeigt die gültigen Fassungen.
-- **Rechtstexte** liegen als Markdown in `legal/<dokument>-<fassung>.md` mit Titel und Datum: `agb`, `avv`, `tom`, `unterauftragnehmer` (Vertrag und Anlagen), `datenschutz`, `impressum`. Der Dienst zeigt sie unter `/<dokument>`, jede Fassung unter `/<dokument>/v/<n>` und alle unter `/rechtliches`; jede Seite verlinkt Impressum, Datenschutz und AGB.
+- **Rechtstexte** liegen als Markdown in `legal/<dokument>-<fassung>.md` mit Titel und Datum: `agb`, `leistungsbeschreibung`, `avv`, `tom`, `unterauftragnehmer` (Vertrag und Anlagen), `datenschutz`, `impressum`. Der Dienst zeigt sie unter `/<dokument>`, jede Fassung unter `/<dokument>/v/<n>` und alle unter `/rechtliches`; jede Seite verlinkt Impressum, Datenschutz und AGB.
 - **Neue Fassung:** Datei `legal/agb-2.md` mit dem Datum des Inkrafttretens anlegen, ausliefern, dann `ops.js legal announce agb 2`. Vertragstexte brauchen mindestens 42 Tage Vorlauf und gelten erst nach der Ankündigung; jeder Kunde mit einer Umgebung bekommt einmal eine Mail mit Datum und Widerspruchsrecht, auch wer sich bis dahin neu anmeldet. Datenschutzerklärung und Impressum gelten ab ihrem Datum.
 - **Löschkonzept:** unbestätigte Anmeldungen samt IP nach 7 Tagen, abgelaufene Anmeldelinks und Sitzungen 30 Tage nach Ablauf, Nutzungszahlen nach 13 Monaten, das Kundenkonto 90 Tage nach Löschung der letzten Umgebung (vorher auf Wunsch im Kundenkonto). Eine angehaltene Umgebung kann der Kunde vor ihrem Termin löschen. Rechnungen bleiben bei Stripe.
 - **Protokolle** ohne IP-Adressen und Abfrageparameter; Container rotieren ihre Protokolle bei 3 × 10 MB.
@@ -93,6 +106,8 @@ Alle Werte stehen mit Beschreibung in `src/config.ts`; die wichtigsten:
 | `STRIPE_PRICES` | JSON, z. B. `{"team:month":"price_…","team:year":"price_…","business:month":"price_…","business:year":"price_…"}` |
 | `STRIPE_AUTOMATIC_TAX` | Stripe Tax für die Umsatzsteuer (Standard an) |
 | `TRIAL_DAYS`, `RETENTION_DAYS` | Standard 30 und 30 |
+| `MAINTENANCE_WINDOW` | wöchentliches Wartungsfenster, Standard `tue 06:00-08:00` (deutsche Zeit); `always` nur für Entwicklung |
+| `SUPPORT_URL`, `SUPPORT_EMAIL` | Portal der Support-Instanz und Adresse (Standard support@lenipo.de) |
 | `OPS_EMAIL`, `OPS_METRICS_TOKEN` | Alarme per Mail; Token für `/ops/metrics` (ohne ihn gibt es den Endpunkt nicht) |
 | `BACKUP_DIR`, `BACKUP_HOUR` | Sicherungen der Instanzen, ab welcher Stunde (UTC) |
 | `SLEEP_AFTER_DAYS` | Testphase ohne Nutzung bis zum Schlafen, Standard 7; 0 = nie |

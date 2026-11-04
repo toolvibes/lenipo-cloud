@@ -138,6 +138,10 @@ export const tenants = pgTable(
     /** The last time a person used the instance, from the daily reading. */
     lastActiveAt: timestamp({ withTimezone: true }),
     /** Failed readiness checks in a row, and since when the instance counts as down. */
+    /** Run by the operator, e.g. the support desk (TL-106): no trial end, no sleep, no limits. */
+    internal: boolean().notNull().default(false),
+    /** The provider notice last set in the instance, to set it only on a change. */
+    noticeVersion: text(),
     healthFailures: integer().notNull().default(0),
     healthyAt: timestamp({ withTimezone: true }),
     downSince: timestamp({ withTimezone: true }),
@@ -173,6 +177,8 @@ export const JOB_KINDS = [
   'update',
   'sleep',
   'wake',
+  /** Sets the provider's notice in the instance, e.g. planned maintenance (TL-106). */
+  'notice',
 ] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 
@@ -277,6 +283,8 @@ export const rollouts = pgTable('rollouts', {
   /** running, paused, done or cancelled. */
   status: text().notNull(),
   pauseReason: text(),
+  /** Started with --now, e.g. a security fix: waves do not wait for the maintenance window. */
+  immediate: boolean().notNull().default(false),
   createdAt: created(),
   finishedAt: timestamp({ withTimezone: true }),
 });
@@ -337,4 +345,43 @@ export const legalNotices = pgTable(
     sentAt: created(),
   },
   (table) => [primaryKey({ columns: [table.customerId, table.document, table.version] })],
+);
+
+/** Per instance and day: minutes checked, failed and failed within maintenance (TL-106). */
+export const availabilityDays = pgTable(
+  'availability_days',
+  {
+    tenantId: uuid()
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    day: date().notNull(),
+    checked: integer().notNull().default(0),
+    failed: integer().notNull().default(0),
+    /** Failures within the maintenance window or announced maintenance; they do not count. */
+    maintenance: integer().notNull().default(0),
+  },
+  (table) => [primaryKey({ columns: [table.tenantId, table.day] })],
+);
+
+export const INCIDENT_KINDS = ['incident', 'maintenance'] as const;
+export type IncidentKind = (typeof INCIDENT_KINDS)[number];
+
+/** What the status page tells: incidents and planned maintenance (TL-106). */
+export const incidents = pgTable(
+  'incidents',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    kind: text().$type<IncidentKind>().notNull(),
+    title: text().notNull(),
+    /** Updates, newest last. */
+    updates: jsonb().$type<{ at: string; text: string }[]>().notNull().default([]),
+    startsAt: timestamp({ withTimezone: true }).notNull(),
+    /** Planned end of maintenance. */
+    endsAt: timestamp({ withTimezone: true }),
+    resolvedAt: timestamp({ withTimezone: true }),
+    /** Opened by the service itself when many instances fail. */
+    automatic: boolean().notNull().default(false),
+    createdAt: created(),
+  },
+  (table) => [index('incidents_starts_idx').on(table.startsAt)],
 );

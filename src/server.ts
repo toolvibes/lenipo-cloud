@@ -13,6 +13,13 @@ import * as views from './views/pages.js';
 
 const SESSION = 'lc_session';
 
+/** This month and the one before, as "YYYY-MM", by the service's clock. */
+const lastMonths = (cloud: Cloud) => {
+  const now = cloud.clock();
+  const previous = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+  return [now.toISOString().slice(0, 7), previous.toISOString().slice(0, 7)];
+};
+
 /** The web pages of Lenipo Cloud: sign-up, sign-in by link, the customer account. */
 export async function createServer(config: Config, cloud: Cloud, logger = true) {
   // Logs without IP addresses and query strings, which carry the sign-in links (E-157).
@@ -148,6 +155,30 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
       legalPage(reply, document, Number(request.params.version)),
     );
   }
+  // The status page (TL-106, E-158); the landing page reads the JSON from another server.
+  app.get('/status.json', async (_request, reply) =>
+    reply
+      .header('access-control-allow-origin', '*')
+      .header('cache-control', 'public, max-age=30')
+      .send(await cloud.status.overview()),
+  );
+  app.get('/status', async (_request, reply) =>
+    reply
+      .header('cache-control', 'public, max-age=30')
+      .type('text/html; charset=utf-8')
+      .send(
+        page(
+          'Status',
+          views.statusPage(await cloud.status.overview(), {
+            url: config.SUPPORT_URL ?? null,
+            email: config.SUPPORT_EMAIL,
+          }),
+          60,
+          true,
+        ),
+      ),
+  );
+
   app.get('/rechtliches', async (_request, reply) => {
     const entries = await Promise.all(
       DOCUMENT_KEYS.map(async (document) => ({
@@ -272,6 +303,9 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
         address: cloud.address(tenant),
         host: cloud.host(tenant),
         used: await cloud.seatsInUse(tenant.id),
+        availability: await Promise.all(
+          lastMonths(cloud).map((month) => cloud.status.availability(tenant.id, month)),
+        ),
       })),
     );
     const accepted = await cloud.compliance.acceptedBy(me.id);
@@ -294,6 +328,7 @@ export async function createServer(config: Config, cloud: Cloud, logger = true) 
       !!me.stripeCustomerId,
       contracts,
       await cloud.compliance.canDelete(me.id),
+      { url: config.SUPPORT_URL ?? null, email: config.SUPPORT_EMAIL },
     );
   };
   const ERRORS: Record<string, string> = {

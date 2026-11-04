@@ -32,9 +32,9 @@ export function html(strings: TemplateStringsArray, ...values: Part[]): Html {
 
 const STYLE = `
 :root { --ink:#1d1d1f; --muted:#5f6368; --accent:#4f46e5; --border:#dadce0; --surface:#fff;
-  --page:#f6f7f9; --danger:#b0402e; --ok:#1e7d4f; color-scheme: light dark; }
+  --page:#f6f7f9; --danger:#b0402e; --ok:#1e7d4f; --warn:#a15c00; --none:#e3e5e8; color-scheme: light dark; }
 @media (prefers-color-scheme: dark) { :root { --ink:#ececf1; --muted:#a0a3ab; --accent:#8b85ff;
-  --border:#3a3d45; --surface:#1f2126; --page:#15171a; --danger:#ff8b7a; --ok:#5fd39b; } }
+  --border:#3a3d45; --surface:#1f2126; --page:#15171a; --danger:#ff8b7a; --ok:#5fd39b; --warn:#f0b35a; --none:#33363d; } }
 * { box-sizing: border-box; }
 body { margin:0; font:15px/1.5 system-ui, sans-serif; color:var(--ink); background:var(--page); }
 main { max-width: 560px; margin: 48px auto; padding: 0 16px; }
@@ -63,9 +63,19 @@ table { border-collapse:collapse; font-size:13px; width:100%; }
 th, td { text-align:left; vertical-align:top; padding:6px 8px; border-bottom:1px solid var(--border); }
 footer { margin:24px 0 0; display:flex; gap:16px; flex-wrap:wrap; font-size:13px; }
 footer a { color:var(--muted); }
+.state { display:flex; gap:10px; align-items:center; padding:12px 14px; border-radius:8px; border:1px solid var(--border); font-weight:600; margin:0 0 16px; }
+.dot { width:10px; height:10px; border-radius:50%; flex:none; }
+.s-operational .dot, .bar.good { background:var(--ok); } .s-degraded .dot, .s-maintenance .dot, .bar.fair { background:var(--warn); }
+.s-outage .dot, .bar.poor { background:var(--danger); } .bar.none { background:var(--none); }
+.bars { display:flex; gap:2px; height:34px; align-items:stretch; margin:8px 0 4px; }
+.bar { flex:1; border-radius:2px; min-width:2px; }
+.legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); }
+.legend span { display:inline-flex; gap:5px; align-items:center; } .legend i { width:10px; height:10px; border-radius:2px; display:inline-block; }
+.incident { border-left:3px solid var(--border); padding:2px 0 2px 12px; margin:0 0 14px; }
+.incident.open { border-color:var(--danger); } .incident.planned { border-color:var(--warn); }
 `;
 
-const FOOTER = `<footer><a href="/impressum">Impressum</a><a href="/datenschutz">Datenschutz</a><a href="/agb">AGB</a><a href="/rechtliches">Rechtliches</a></footer>`;
+const FOOTER = `<footer><a href="/status">Status</a><a href="/impressum">Impressum</a><a href="/datenschutz">Datenschutz</a><a href="/agb">AGB</a><a href="/rechtliches">Rechtliches</a></footer>`;
 
 /** A whole page; `refresh` reloads it after that many seconds, `wide` suits long texts. */
 export function page(title: string, body: Html, refresh?: number, wide = false): string {

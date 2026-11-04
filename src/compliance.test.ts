@@ -122,6 +122,7 @@ describe('sign-up for businesses with stored acceptance (TL-105)', () => {
     expect(rows.map((row) => `${row.document}:${row.version}`).sort()).toEqual([
       'agb:1',
       'avv:1',
+      'leistungsbeschreibung:1',
       'tom:1',
       'unterauftragnehmer:1',
     ]);

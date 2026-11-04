@@ -24,6 +24,7 @@ async function fakeInstances(imageOf: (slug: string) => string | null) {
   const provisioned = new Set<string>();
   const calls: Array<{ slug: string; body: unknown; token: string }> = [];
   const limits = new Map<string, unknown>();
+  const notices = new Map<string, { text: string; level: string }>();
   const usage = new Map<string, Usage>();
   const server: Server = createHttpServer((request, response) => {
     const [, slug, ...rest] = (request.url ?? '').split('/');
@@ -45,6 +46,17 @@ async function fakeInstances(imageOf: (slug: string) => string | null) {
       response
         .writeHead(200, { 'content-type': 'application/json' })
         .end(JSON.stringify(usage.get(slug ?? '') ?? { persons: 1, agents: 0, storageMb: 0 }));
+      return;
+    }
+    if (path === '/api/v1/provider/notice' && request.method === 'PUT') {
+      let body = '';
+      request.on('data', (chunk) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        notices.set(slug ?? '', JSON.parse(body));
+        response.writeHead(200, { 'content-type': 'application/json' }).end(body);
+      });
       return;
     }
     if (path === '/api/v1/provider/limits' && request.method === 'PUT') {
@@ -88,6 +100,7 @@ async function fakeInstances(imageOf: (slug: string) => string | null) {
     server,
     calls,
     limits,
+    notices,
     usage,
     down,
     broken,
@@ -113,6 +126,8 @@ export interface TestCloud {
   setupCalls: Array<{ slug: string; body: unknown; token: string }>;
   /** The frame each instance got, and what it reports as used. */
   limits: Map<string, unknown>;
+  /** The provider notice each instance got (TL-106). */
+  notices: Map<string, { text: string; level: string }>;
   usage: Map<string, Usage>;
   /** Instances whose readiness check fails, and versions that never get ready. */
   down: Set<string>;
@@ -159,6 +174,8 @@ export async function startTestCloud(overrides: Record<string, string> = {}): Pr
       'business:year': 'price_business_year',
     }),
     LOG_LEVEL: 'fatal',
+    // Rollouts are tested apart from the weekly window; the window has its own test.
+    MAINTENANCE_WINDOW: 'always',
     ...overrides,
   });
   const database = createDatabase(config.DATABASE_URL);
@@ -193,6 +210,7 @@ export async function startTestCloud(overrides: Record<string, string> = {}): Pr
     clock,
     setupCalls: instances.calls,
     limits: instances.limits,
+    notices: instances.notices,
     usage: instances.usage,
     down: instances.down,
     broken: instances.broken,

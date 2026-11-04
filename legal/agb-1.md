@@ -14,7 +14,7 @@ effective: 2026-11-04
 2. Jede Umgebung läuft getrennt von denen anderer Kunden mit eigener Datenbank und eigenem Dateispeicher auf Servern in Deutschland.
 3. Der Anbieter sichert jede Umgebung täglich und hält die Sicherungen der letzten sieben Tage sowie je eine wöchentliche Sicherung der letzten vier Wochen vor.
 4. Der Anbieter entwickelt die Software weiter und spielt neue Versionen ein. Der Umfang wesentlicher Funktionen eines gebuchten Tarifs wird dabei nicht zum Nachteil des Kunden eingeschränkt.
-5. Wartungen kündigt der Anbieter rechtzeitig an, soweit sie nicht dringend nötig sind, etwa um Sicherheitslücken zu schließen. Zugesagte Verfügbarkeiten ergeben sich aus der Beschreibung des jeweiligen Tarifs.
+5. Umfang der Tarife, zugesagte Verfügbarkeit, Wartungsfenster und Support regelt die [Leistungsbeschreibung](/leistungsbeschreibung); sie ist Teil dieses Vertrags.
 6. Umgebungen in der Testphase, die sieben Tage nicht genutzt wurden, werden angehalten und beim nächsten Aufruf innerhalb kurzer Zeit wieder gestartet.
 
 ## 3. Anmeldung, Testphase und Vertragsschluss

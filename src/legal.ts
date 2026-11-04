@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
  */
 export const DOCUMENTS = {
   agb: { title: 'Allgemeine Geschäftsbedingungen', contract: true },
+  leistungsbeschreibung: { title: 'Leistungsbeschreibung', contract: true },
   avv: { title: 'Vertrag zur Auftragsverarbeitung', contract: true },
   tom: { title: 'Technische und organisatorische Maßnahmen', contract: true },
   unterauftragnehmer: { title: 'Unterauftragnehmer', contract: true },
@@ -17,7 +18,13 @@ export const DOCUMENTS = {
 export type DocumentKey = keyof typeof DOCUMENTS;
 export const DOCUMENT_KEYS = Object.keys(DOCUMENTS) as DocumentKey[];
 /** What a customer accepts at sign-up: the contract and its annexes. */
-export const ACCEPTED: DocumentKey[] = ['agb', 'avv', 'tom', 'unterauftragnehmer'];
+export const ACCEPTED: DocumentKey[] = [
+  'agb',
+  'leistungsbeschreibung',
+  'avv',
+  'tom',
+  'unterauftragnehmer',
+];
 /** Contract documents change only after this notice, with the right to object (E-157). */
 export const NOTICE_DAYS = 42;
 

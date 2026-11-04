@@ -1,6 +1,7 @@
 import type { Compliance } from './compliance.js';
 import type { Fleet } from './fleet.js';
 import { DOCUMENT_KEYS } from './legal.js';
+import { berlinDateTime, type StatusBoard } from './status.js';
 
 /**
  * The commands of `ops.js` (E-156). They only read and queue work; the running service does it.
@@ -12,7 +13,8 @@ export const USAGE = `ops.js <command>
   tenants                      every instance with version, health and last backup
   tenant <name>                one instance: state, backups, jobs, events
   canary <name> on|off         updated in the first wave of a rollout
-  rollout start <version> [--wave <n>]
+  rollout start <version> [--wave <n>] [--now]
+                               waves start in the maintenance window; --now for security fixes
   rollout status | resume | cancel
   backup <name>                a backup now
   restore <name> <backup> --yes
@@ -20,6 +22,15 @@ export const USAGE = `ops.js <command>
   sleep <name> | wake <name>
   retry <name>                 failed jobs of the instance run again
   alerts                       open alerts
+  incidents                    open incidents and planned maintenance
+  incident open <title> <text> a public incident on the status page
+  incident update <id> <text> | incident resolve <id> [<text>]
+  maintenance plan <start> <minutes> <title> [--urgent]
+                               start "YYYY-MM-DD HH:MM" German time, at least 3 days ahead
+  maintenance cancel <id>
+  availability <name> [YYYY-MM]
+                               checked and failed minutes of a month, against 99.5 %
+  internal <name> on|off       run by the operator (support desk): no trial end, sleep or limits
   legal status                 documents in force, announced versions, places to fill in
   legal announce <doc> <n>     releases version n from legal/ for its date and mails customers
   legal accepted <e-mail>      what a customer accepted, when and from where`;
@@ -44,11 +55,28 @@ function table(rows: string[][]): string {
     .join('\n');
 }
 
+/** "2026-11-10 06:00" in German time, or an ISO time with offset. */
+export function parseBerlin(text: string): Date {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/.exec(text.trim());
+  if (!match) return new Date(text);
+  const [, y, mo, d, h, mi] = match.map(Number) as number[];
+  const guess = Date.UTC(y ?? 0, (mo ?? 1) - 1, d ?? 1, h ?? 0, mi ?? 0);
+  // The offset of Europe/Berlin at that moment (1 or 2 hours).
+  const shown = new Date(new Date(guess).toLocaleString('en-US', { timeZone: 'Europe/Berlin' }));
+  const utc = new Date(new Date(guess).toLocaleString('en-US', { timeZone: 'UTC' }));
+  return new Date(guess - (shown.getTime() - utc.getTime()));
+}
+
 export async function runOps(
   fleet: Fleet,
   args: string[],
   compliance?: Compliance,
+  status?: StatusBoard,
 ): Promise<string> {
+  const board = () => {
+    if (!status) throw new Error('This command needs the status part of the service');
+    return status;
+  };
   const [command, ...rest] = args;
   const flag = (name: string) => {
     const index = rest.indexOf(name);
@@ -155,8 +183,13 @@ export async function runOps(
       if (action === 'start') {
         const version = rest[1] ?? '';
         const wave = flag('--wave');
-        const rollout = await fleet.startRollout(version, wave ? Number(wave) : undefined);
-        return `Rollout auf ${rollout.version} gestartet, Wellen zu ${rollout.waveSize}. Die erste Welle beginnt innerhalb einer Minute.`;
+        const now = rest.includes('--now');
+        const rollout = await fleet.startRollout(version, wave ? Number(wave) : undefined, now);
+        return `Rollout auf ${rollout.version} gestartet, Wellen zu ${rollout.waveSize}. ${
+          now
+            ? 'Die erste Welle beginnt innerhalb einer Minute.'
+            : 'Die Wellen laufen im Wartungsfenster.'
+        }`;
       }
       if (action === 'resume')
         return `Rollout auf ${(await fleet.resumeRollout()).version} läuft weiter.`;
@@ -200,6 +233,68 @@ export async function runOps(
             )
             .join('\n\n')
         : 'Keine offenen Alarme.';
+    }
+    case 'incidents': {
+      const open = await board().openIncidents();
+      return open.length > 0
+        ? open
+            .map(
+              (row) =>
+                `#${row.id}  ${row.kind === 'maintenance' ? 'Wartung' : 'Störung'}  ${berlinDateTime(row.startsAt)}${row.endsAt ? ` bis ${berlinDateTime(row.endsAt)}` : ''}  ${row.title}${row.automatic ? ' (automatisch)' : ''}`,
+            )
+            .join('\n')
+        : 'Keine offenen Störungen oder geplanten Wartungen.';
+    }
+    case 'incident': {
+      const [action, first = '', second] = rest;
+      if (action === 'open') {
+        if (!first || !second) throw new Error('incident open <title> <text>');
+        const row = await board().openIncident(first, second);
+        return `Störung #${row.id} steht auf der Statusseite.`;
+      }
+      if (action === 'update') {
+        if (!second) throw new Error('incident update <id> <text>');
+        await board().updateIncident(Number(first), second);
+        return `#${first} ergänzt.`;
+      }
+      if (action === 'resolve') {
+        await board().resolveIncident(Number(first), second);
+        return `#${first} ist behoben.`;
+      }
+      throw new Error('incident open <title> <text> | update <id> <text> | resolve <id> [<text>]');
+    }
+    case 'maintenance': {
+      const [action, first = '', second = '', ...words] = rest;
+      if (action === 'plan') {
+        const title = words.filter((word) => word !== '--urgent').join(' ');
+        if (!title) throw new Error('maintenance plan <start> <minutes> <title> [--urgent]');
+        const row = await board().planMaintenance(
+          parseBerlin(first),
+          Number(second),
+          title,
+          rest.includes('--urgent'),
+        );
+        return `Wartung #${row.id} am ${berlinDateTime(row.startsAt)} steht auf der Statusseite; die Instanzen zeigen sie ab drei Tagen vorher.`;
+      }
+      if (action === 'cancel') {
+        await board().cancelMaintenance(Number(first));
+        return `Wartung #${first} ist abgesagt.`;
+      }
+      throw new Error('maintenance plan <start> <minutes> <title> [--urgent] | cancel <id>');
+    }
+    case 'availability': {
+      const tenant = await fleet.tenantBySlug(name);
+      const month = rest[1] ?? new Date().toISOString().slice(0, 7);
+      const a = await board().availability(tenant.id, month);
+      return a.ratio === null
+        ? `${name} ${month}: keine Prüfungen.`
+        : `${name} ${month}: ${(a.ratio * 100).toFixed(3)} % verfügbar (${a.checked} Minuten geprüft, ${a.failed} ausgefallen, ${a.maintenance} in Wartung)${a.breached ? '; unter 99,5 %: Gutschrift auf Antrag' : ''}.`;
+    }
+    case 'internal': {
+      const on = rest[1] === 'on';
+      if (rest[1] !== 'on' && rest[1] !== 'off') throw new Error('internal <name> on|off');
+      await fleet.setInternal(name, on);
+      return `${name}: ${on ? 'intern, ohne Testphase, Schlaf und Grenzen' : 'wieder wie eine Kundeninstanz'}.`;
     }
     case 'legal': {
       if (!compliance) throw new Error('legal needs the compliance part of the service');

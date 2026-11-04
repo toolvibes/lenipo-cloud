@@ -20,6 +20,7 @@ import { fileKey, sealFile, unsealFile } from './files.js';
 import type { Mailer } from './mail.js';
 import { type Interval, isInterval, isPlanKey, PLANS } from './plans.js';
 import type { Instance, Platform } from './platform/platform.js';
+import { inWindow, type StatusBoard } from './status.js';
 
 const DAY = 86_400_000;
 /** Failed readiness checks in a row before an instance counts as down. */
@@ -55,6 +56,8 @@ export interface FleetContext {
   enqueue(tenantId: string, kind: JobKind, payload?: Record<string, unknown>): Promise<void>;
   instance(tenant: TenantRow, version?: string): Instance;
   waitUntilLive(base: string): Promise<void>;
+  /** Availability, incidents and maintenance (TL-106). */
+  status: StatusBoard;
 }
 
 const LIVE: TenantStatus[] = ['trial', 'active'];
@@ -481,8 +484,22 @@ Die Instanz geht zurück auf ${from}.${
     await this.scheduleBackups(live);
     await this.scheduleSleep(live);
     await this.checkHealth(live);
+    await this.ctx.status.checkOutage();
+    await this.scheduleNotices(live);
     await this.checkCapacity();
     await this.advanceRollout();
+  }
+
+  /** The provider notice (planned maintenance) into every running instance that lacks it. */
+  private async scheduleNotices(live: TenantRow[]) {
+    const { notice, version } = await this.ctx.status.desiredNotice();
+    const waiting = await this.busy('notice');
+    for (const tenant of live) {
+      if (tenant.sleepingAt || tenant.noticeVersion === version || waiting.has(tenant.id)) continue;
+      // A fresh instance without a notice needs none.
+      if (tenant.noticeVersion === null && notice.text === '') continue;
+      await this.ctx.enqueue(tenant.id, 'notice');
+    }
   }
 
   private async scheduleBackups(live: TenantRow[]) {
@@ -511,7 +528,14 @@ Die Instanz geht zurück auf ${from}.${
     const now = this.ctx.now().getTime();
     const waiting = await this.busy('sleep');
     for (const tenant of live) {
-      if (tenant.status !== 'trial' || tenant.sleepingAt || waiting.has(tenant.id)) continue;
+      if (
+        tenant.status !== 'trial' ||
+        tenant.internal ||
+        tenant.sleepingAt ||
+        waiting.has(tenant.id)
+      ) {
+        continue;
+      }
       const since = (tenant.lastActiveAt ?? tenant.createdAt).getTime();
       if (now - since >= days * DAY) await this.ctx.enqueue(tenant.id, 'sleep');
     }
@@ -528,11 +552,15 @@ Die Instanz geht zurück auf ${from}.${
       ).map((row) => row.tenantId),
     );
     const due = live.filter((tenant) => !tenant.sleepingAt && !working.has(tenant.id));
+    // Failures in the weekly window or announced maintenance do not count (E-158).
+    const maintenance = await this.ctx.status.maintenanceNow();
     for (let start = 0; start < due.length; start += PROBE_BATCH) {
       const batch = due.slice(start, start + PROBE_BATCH);
       const results = await Promise.all(batch.map((tenant) => this.probe(tenant.slug)));
       for (const [index, tenant] of batch.entries()) {
-        await this.recordHealth(tenant, results[index] ?? false);
+        const ok = results[index] ?? false;
+        await this.ctx.status.record(tenant.id, ok, maintenance);
+        await this.recordHealth(tenant, ok);
       }
     }
   }
@@ -617,7 +645,8 @@ Nachsehen: ops.js tenant ${tenant.slug}`,
     return row ?? null;
   }
 
-  async startRollout(version: string, waveSize = 10): Promise<RolloutRow> {
+  /** Waves start within the maintenance window; `immediate` (security fixes) at once. */
+  async startRollout(version: string, waveSize = 10, immediate = false): Promise<RolloutRow> {
     if (!VERSION.test(version)) throw new Error(`Not a version: ${version}`);
     if (!Number.isInteger(waveSize) || waveSize < 1) throw new Error('The wave size is at least 1');
     const active = await this.activeRollout();
@@ -633,6 +662,7 @@ Nachsehen: ops.js tenant ${tenant.slug}`,
         version,
         waveSize,
         status: 'running',
+        immediate,
         createdAt: this.ctx.now(),
       })
       .returning();
@@ -681,6 +711,7 @@ Nachsehen: ops.js tenant ${tenant.slug}`,
         ),
       );
     if ((inFlight?.count ?? 0) > 0) return;
+    if (!rollout.immediate && !inWindow(this.config.MAINTENANCE_WINDOW, this.ctx.now())) return;
     const pending = (await this.rolloutPending(rollout.version)).filter(
       (tenant) => !tenant.sleepingAt,
     );
@@ -806,6 +837,17 @@ Nachsehen: ops.js tenant ${tenant.slug}`,
   async setCanary(slug: string, canary: boolean) {
     const tenant = await this.tenantBySlug(slug);
     await this.db.update(tenants).set({ canary }).where(eq(tenants.id, tenant.id));
+  }
+
+  /** An instance of the operator, e.g. the support desk (E-158): no trial end, no sleep, no limits. */
+  async setInternal(slug: string, internal: boolean) {
+    const tenant = await this.tenantBySlug(slug);
+    await this.db
+      .update(tenants)
+      .set({ internal, ...(internal ? { sleepingAt: null } : {}) })
+      .where(eq(tenants.id, tenant.id));
+    if (tenant.sleepingAt && internal) await this.ctx.enqueue(tenant.id, 'wake');
+    await this.ctx.enqueue(tenant.id, 'limits');
   }
 
   async requestBackup(slug: string) {

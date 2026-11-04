@@ -65,6 +65,18 @@ export const Config = z.object({
   /** Instances run at once by the worker; never two jobs of one instance. */
   JOB_WORKERS: z.coerce.number().int().min(1).max(8).default(2),
 
+  /**
+   * Weekly window for updates with downtime (TL-106), Europe/Berlin, e.g. "tue 06:00-08:00";
+   * "always" for development and tests. Rollout waves start only within it.
+   */
+  MAINTENANCE_WINDOW: z
+    .string()
+    .regex(/^(always|(mon|tue|wed|thu|fri|sat|sun) \d{2}:\d{2}-\d{2}:\d{2})$/)
+    .default('tue 06:00-08:00'),
+  /** The support portal (a Lenipo instance with service desk), linked in accounts and instances. */
+  SUPPORT_URL: z.url({ protocol: /^https?$/ }).optional(),
+  SUPPORT_EMAIL: z.email().default('support@lenipo.de'),
+
   TRIAL_DAYS: z.coerce.number().int().min(1).default(30),
   /** How long data stays after an instance was stopped (trial over, cancelled). */
   RETENTION_DAYS: z.coerce.number().int().min(1).default(30),

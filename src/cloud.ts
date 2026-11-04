@@ -35,6 +35,7 @@ import {
 import type { Instance, Platform } from './platform/platform.js';
 import { databaseName } from './platform/platform.js';
 import { decrypt, encrypt, randomToken, sha256 } from './secrets.js';
+import { StatusBoard } from './status.js';
 
 const DAY = 86_400_000;
 const SIGNUP_HOURS = 48;
@@ -110,6 +111,8 @@ export class Cloud {
   readonly fleet: Fleet;
   /** Legal documents, acceptances, announcements and deletion periods (E-157). */
   readonly compliance: Compliance;
+  /** Availability, incidents, maintenance and the status page (E-158). */
+  readonly status: StatusBoard;
 
   constructor(
     private readonly config: Config,
@@ -121,6 +124,7 @@ export class Cloud {
     private readonly now: () => Date = () => new Date(),
   ) {
     this.compliance = new Compliance({ config, database, mailer, now });
+    this.status = new StatusBoard({ config, database, now });
     this.fleet = new Fleet({
       config,
       database,
@@ -131,11 +135,17 @@ export class Cloud {
       enqueue: (tenantId, kind, payload) => this.enqueue(tenantId, kind, this.now(), payload),
       instance: (tenant, version) => this.instance(tenant, version),
       waitUntilLive: (base) => this.waitUntilLive(base),
+      status: this.status,
     });
   }
 
   private get db() {
     return this.database.db;
+  }
+
+  /** The service's clock (controlled in tests). */
+  clock(): Date {
+    return this.now();
   }
 
   private link(path: string, token: string) {
@@ -688,11 +698,18 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
   }
 
   /** The frame of the plan in the instance (the product's provider limits). */
+  /** Where people of an instance reach support (E-158): the portal, else the address. */
+  supportUrl(): string {
+    return this.config.SUPPORT_URL ?? `mailto:${this.config.SUPPORT_EMAIL}`;
+  }
+
   private async pushLimits(tenant: TenantRow) {
-    const limits =
-      tenant.plan && isPlanKey(tenant.plan) && tenant.seats
+    const frame = tenant.internal
+      ? { plan: 'Intern' }
+      : tenant.plan && isPlanKey(tenant.plan) && tenant.seats
         ? limitsOf(PLANS[tenant.plan], tenant.seats)
         : TRIAL_LIMITS;
+    const limits = { ...frame, supportUrl: this.supportUrl() };
     const secrets = decrypt<TenantSecrets>(this.config.SECRET_KEY, tenant.secrets);
     const response = await fetch(
       `${this.platform.instanceUrl(tenant.slug)}/api/v1/provider/limits`,
@@ -706,6 +723,26 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
       },
     );
     if (!response.ok) throw new Error(`Limits: ${response.status} ${await response.text()}`);
+  }
+
+  /** The provider notice, e.g. planned maintenance (E-158); only when it changed. */
+  private async pushNotice(tenant: TenantRow) {
+    const { notice, version } = await this.status.desiredNotice();
+    if (tenant.noticeVersion === version) return;
+    const secrets = decrypt<TenantSecrets>(this.config.SECRET_KEY, tenant.secrets);
+    const response = await fetch(
+      `${this.platform.instanceUrl(tenant.slug)}/api/v1/provider/notice`,
+      {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${secrets.setupToken}`,
+        },
+        body: JSON.stringify(notice),
+      },
+    );
+    if (!response.ok) throw new Error(`Notice: ${response.status} ${await response.text()}`);
+    await this.db.update(tenants).set({ noticeVersion: version }).where(eq(tenants.id, tenant.id));
   }
 
   /** What the instance uses, kept once a day. */
@@ -889,7 +926,7 @@ Haben Sie keinen Link angefordert, ignorieren Sie diese Mail.`,
         await this.suspend(tenant, 'cancelled');
         continue;
       }
-      if (tenant.status === 'trial' && tenant.trialEndsAt) {
+      if (tenant.status === 'trial' && tenant.trialEndsAt && !tenant.internal) {
         if (tenant.trialEndsAt <= now) {
           await this.suspend(tenant, 'trial-ended');
           continue;
@@ -1074,6 +1111,10 @@ Nachsehen: ops.js tenant ${tenant.slug}; neu versuchen: ops.js retry ${tenant.sl
         if (tenant.status !== 'trial' && tenant.status !== 'active') return;
         if (tenant.sleepingAt) return;
         return this.readUsage(tenant);
+      case 'notice':
+        if (tenant.status !== 'trial' && tenant.status !== 'active') return;
+        if (tenant.sleepingAt) return;
+        return this.pushNotice(tenant);
       case 'export':
         return this.export(tenant);
       case 'delete':

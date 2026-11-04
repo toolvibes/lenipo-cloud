@@ -36,7 +36,7 @@ export function signupForm(
       <label class="check"><input type="checkbox" name="business" value="on" required ${values.business ? html`checked` : ''}>
         <span>Ich nutze Lenipo Cloud für ein Unternehmen, eine Behörde oder einen Verein, nicht als Verbraucher.</span></label>
       <label class="check"><input type="checkbox" name="terms" value="on" required ${values.terms ? html`checked` : ''}>
-        <span>Ich stimme den <a href="/agb" target="_blank">AGB</a> und dem <a href="/avv" target="_blank">Vertrag zur Auftragsverarbeitung</a> mit seinen Anlagen (<a href="/tom" target="_blank">technische und organisatorische Maßnahmen</a>, <a href="/unterauftragnehmer" target="_blank">Unterauftragnehmer</a>) zu. Die <a href="/datenschutz" target="_blank">Datenschutzerklärung</a> habe ich zur Kenntnis genommen.</span></label>
+        <span>Ich stimme den <a href="/agb" target="_blank">AGB</a> mit der <a href="/leistungsbeschreibung" target="_blank">Leistungsbeschreibung</a> und dem <a href="/avv" target="_blank">Vertrag zur Auftragsverarbeitung</a> mit seinen Anlagen (<a href="/tom" target="_blank">technische und organisatorische Maßnahmen</a>, <a href="/unterauftragnehmer" target="_blank">Unterauftragnehmer</a>) zu. Die <a href="/datenschutz" target="_blank">Datenschutzerklärung</a> habe ich zur Kenntnis genommen.</span></label>
       <button type="submit">Anmelden</button>
     </form>
     <p class="muted" style="margin-top:16px">Schon angemeldet? <a href="/login">Zum Kundenkonto</a></p>
@@ -91,6 +91,8 @@ export interface TenantView {
   host: string;
   /** People who take a seat now, from the latest reading. */
   used: number;
+  /** This month and the last (TL-106). */
+  availability?: AvailabilityView[];
 }
 
 export interface ContractView {
@@ -108,6 +110,7 @@ export function account(
   billing = false,
   contracts: ContractView[] = [],
   deletable = false,
+  support?: { url: string | null; email: string },
 ): Html {
   return html`<div class="card">
     <div class="row" style="justify-content:space-between">
@@ -122,6 +125,11 @@ export function account(
     ${
       billing
         ? html`<form method="post" action="/account/billing"><button class="secondary">Zahlungsdaten und Rechnungen</button></form>`
+        : ''
+    }
+    ${
+      support
+        ? html`<h2>Hilfe</h2><p class="muted">Fragen und Störungen: ${support.url ? html`<a href="${support.url}">Support-Portal</a> oder ` : ''}<a href="mailto:${support.email}">${support.email}</a>. Den Zustand des Dienstes zeigt die <a href="/status">Statusseite</a>.</p>`
         : ''
     }
     ${contracts.length ? contractList(contracts) : ''}
@@ -202,6 +210,7 @@ function tenantCard(view: TenantView): Html {
     <h2>${tenant.name}</h2>
     <p>${running ? html`<a href="${address}">${address}</a>` : address} · ${STATUS[tenant.status] ?? tenant.status}</p>
     ${tenant.status === 'trial' ? html`<p class="muted">Testphase bis ${date(tenant.trialEndsAt)}.</p>` : ''}
+    ${running && view.availability?.length ? availabilityLine(view.availability) : ''}
     ${
       tenant.status === 'active' && plan
         ? html`<p>Tarif ${plan.name}, ${tenant.seats} Plätze (${view.used} belegt), ${tenant.interval === 'year' ? 'jährlich' : 'monatlich'}. ${
@@ -341,4 +350,98 @@ export function legalIndex(entries: { current: LegalVersion; count: number }[]):
         html`<li><a href="/${current.document}">${current.title}</a> <span class="muted">Fassung ${current.version} vom ${longDate(current.effective)}${count > 1 ? `, ${count} Fassungen` : ''}</span></li>`,
     )}</ul>
   </div>`;
+}
+
+type Overview = Awaited<ReturnType<import('../status.js').StatusBoard['overview']>>;
+type Incident = Overview['active'][number];
+
+const STATE_TEXT: Record<Overview['state'], string> = {
+  operational: 'Alle Systeme betriebsbereit',
+  degraded: 'Einzelne Umgebungen eingeschränkt',
+  maintenance: 'Wartung läuft',
+  outage: 'Störung',
+};
+const berlin = (iso: string) =>
+  new Date(iso).toLocaleString('de-DE', {
+    timeZone: 'Europe/Berlin',
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+const percent = (value: number) =>
+  `${(value * 100).toLocaleString('de-DE', { maximumFractionDigits: 2, minimumFractionDigits: 2 })} %`;
+
+function incidentBlock(row: Incident, kind: 'open' | 'planned' | 'done'): Html {
+  return html`<div class="incident ${kind}">
+    <p><strong>${row.title}</strong><br><span class="muted">${row.kind === 'maintenance' ? 'Wartung' : 'Störung'} · ${berlin(row.startsAt)}${row.endsAt ? ` bis ${berlin(row.endsAt)}` : ''}${row.resolvedAt ? ` · behoben ${berlin(row.resolvedAt)}` : ''}</span></p>
+    ${row.updates.map((update) => html`<p class="muted">${berlin(update.at)}: ${update.text}</p>`)}
+  </div>`;
+}
+
+/** The public status page (TL-106, E-158); the same data is at /status.json. */
+export function statusPage(o: Overview, support: { url: string | null; email: string }): Html {
+  const { running, ready } = o.components.instances;
+  return html`<div class="card doc">
+    <h1>Status von Lenipo Cloud</h1>
+    <div class="state s-${o.state}" role="status"><span class="dot" aria-hidden="true"></span>${STATE_TEXT[o.state]}</div>
+    <ul>
+      <li>Anmeldung und Kundenkonto: betriebsbereit</li>
+      <li>Umgebungen: ${running === 0 ? 'keine in Betrieb' : `${ready} von ${running} bereit`}</li>
+    </ul>
+    ${o.active.length ? html`<h2>Aktuell</h2>${o.active.map((row) => incidentBlock(row, row.kind === 'maintenance' ? 'planned' : 'open'))}` : ''}
+    ${o.upcoming.length ? html`<h2>Geplante Wartungen</h2>${o.upcoming.map((row) => incidentBlock(row, 'planned'))}` : ''}
+    <h2>Verfügbarkeit der letzten 90 Tage</h2>
+    <div class="bars" role="img" aria-label="Verfügbarkeit je Tag, die Tabelle darunter nennt die Tage mit Ausfällen">
+      ${o.history.map((day) => {
+        const level =
+          day.availability === null
+            ? 'none'
+            : day.availability >= 0.995
+              ? 'good'
+              : day.availability >= 0.98
+                ? 'fair'
+                : 'poor';
+        const label = `${new Date(`${day.day}T12:00:00Z`).toLocaleDateString('de-DE')}: ${
+          day.availability === null ? 'keine Messung' : percent(day.availability)
+        }${day.incidents.length ? ` · ${day.incidents.join(', ')}` : ''}`;
+        return html`<span class="bar ${level}" title="${label}"></span>`;
+      })}
+    </div>
+    <div class="legend"><span><i class="bar good"></i>ab 99,5 %</span><span><i class="bar fair"></i>98 bis 99,5 %</span><span><i class="bar poor"></i>unter 98 %</span><span><i class="bar none"></i>keine Messung</span></div>
+    ${(() => {
+      const bad = o.history.filter((day) => day.availability !== null && day.availability < 0.995);
+      return bad.length
+        ? html`<div class="table" style="margin-top:12px"><table><thead><tr><th>Tag</th><th>Verfügbarkeit</th><th>Störungen</th></tr></thead><tbody>${bad.map(
+            (day) =>
+              html`<tr><td>${new Date(`${day.day}T12:00:00Z`).toLocaleDateString('de-DE')}</td><td>${percent(day.availability ?? 0)}</td><td>${day.incidents.join(', ') || '–'}</td></tr>`,
+          )}</tbody></table></div>`
+        : html`<p class="muted" style="margin-top:8px">Kein Tag unter 99,5 %.</p>`;
+    })()}
+    ${o.recent.length ? html`<h2>Vergangene Störungen und Wartungen</h2>${o.recent.map((row) => incidentBlock(row, 'done'))}` : ''}
+    <h2>Wartung und Support</h2>
+    <p>Updates mit kurzer Unterbrechung laufen im festen Wartungsfenster ${o.maintenanceWindow}. Andere Wartungen kündigen wir mindestens drei Tage vorher hier und in den Umgebungen an. Zugesagt sind 99,5 % Verfügbarkeit je Monat, siehe <a href="/leistungsbeschreibung">Leistungsbeschreibung</a>.</p>
+    <p>Support: ${support.url ? html`<a href="${support.url}">Support-Portal</a> oder ` : ''}<a href="mailto:${support.email}">${support.email}</a></p>
+    <p class="muted">Stand ${berlin(o.generatedAt)} · <a href="/status.json">als JSON</a></p>
+  </div>`;
+}
+
+export interface AvailabilityView {
+  month: string;
+  ratio: number | null;
+  breached: boolean;
+}
+
+/** Availability of an instance in the account: this month and the last (E-158). */
+export function availabilityLine(list: AvailabilityView[]): Html {
+  const month = (value: string) =>
+    new Date(`${value}-15T12:00:00Z`).toLocaleDateString('de-DE', {
+      month: 'long',
+      year: 'numeric',
+    });
+  return html`<p class="muted">Verfügbarkeit: ${list.map(
+    (entry, index) =>
+      html`${index > 0 ? ', ' : ''}${month(entry.month)} ${entry.ratio === null ? 'keine Messung' : percent(entry.ratio)}${entry.breached ? ' (unter 99,5 %: Gutschrift auf Antrag)' : ''}`,
+  )}</p>`;
 }
