@@ -19,6 +19,9 @@ export const USAGE = `ops.js <command>
   backup <name>                a backup now
   restore <name> <backup> --yes
                                replaces all data with that backup (id or its start)
+  import <name> <file.zip> --yes
+                               moving in: replaces all data with a backup from the customer's
+                               own Lenipo of the same version (the current state is saved first)
   sleep <name> | wake <name>
   retry <name>                 failed jobs of the instance run again
   alerts                       open alerts
@@ -214,6 +217,15 @@ export async function runOps(
       }
       const backup = await fleet.requestRestore(name, rest[1] ?? '');
       return `Wiederherstellung von ${name} auf den Stand vom ${date(backup.createdAt)} (Version ${backup.version}) ist eingeplant.`;
+    }
+    case 'import': {
+      if (!rest.includes('--yes')) {
+        throw new Error(
+          `Ersetzt alle Daten von ${name} durch die mitgebrachte Sicherung (vorher wird der jetzige Stand gesichert; die Sicherung muss von der Version der Instanz stammen). Mit --yes bestätigen.`,
+        );
+      }
+      const row = await fleet.importBackup(name, rest[1] ?? '');
+      return `Die Sicherung ist als ${row.id.slice(0, 8)} abgelegt; die Wiederherstellung von ${name} ist eingeplant (Version ${row.version}).`;
     }
     case 'sleep':
       await fleet.requestSleep(name);

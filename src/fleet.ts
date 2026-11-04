@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { Config } from './config.js';
@@ -863,6 +863,39 @@ Nachsehen: ops.js tenant ${tenant.slug}`,
     if (!known) throw new Error(`No backup ${backupId} of ${slug}`);
     await this.ctx.enqueue(tenant.id, 'restore', { backupId: known.id });
     return known;
+  }
+
+  /**
+   * Moving in (TL-107): a backup a customer brings from a Lenipo of their own becomes a backup
+   * of the instance and replaces its data. It must come from the version the instance runs.
+   */
+  async importBackup(slug: string, source: string): Promise<BackupRow> {
+    const tenant = await this.tenantBySlug(slug);
+    if (!isLive(tenant))
+      throw new Error(`${slug} is ${tenant.status}; import into running instances`);
+    const dir = this.backupDir(tenant);
+    await mkdir(dir, { recursive: true });
+    const at = this.ctx.now();
+    const file = join(dir, `${at.toISOString().replace(/[:.]/g, '-')}-manual.zip.enc`);
+    await copyFile(source, `${file}.part`);
+    await sealFile(`${file}.part`, file, this.key);
+    const { size } = await stat(file);
+    const [row] = await this.db
+      .insert(backups)
+      .values({
+        id: randomUUID(),
+        tenantId: tenant.id,
+        kind: 'manual',
+        file,
+        sizeBytes: size,
+        version: this.versionOf(tenant),
+        createdAt: at,
+      })
+      .returning();
+    if (!row) throw new Error('Backup row missing');
+    await this.ctx.event(tenant.id, 'backup-imported', { bytes: size });
+    await this.ctx.enqueue(tenant.id, 'restore', { backupId: row.id });
+    return row;
   }
 
   async requestSleep(slug: string) {

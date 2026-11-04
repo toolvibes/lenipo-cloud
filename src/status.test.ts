@@ -206,4 +206,19 @@ describe('support (TL-106)', () => {
     expect((await tenantBySlug('servicedesk')).status).toBe('trial');
     expect((await tenantBySlug('mess')).status).toBe('suspended');
   });
+
+  it('moves a customer in with a backup from their own Lenipo (TL-107)', async () => {
+    const { writeFile, mkdtemp } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = await mkdtemp(join(tmpdir(), 'lenipo-import-'));
+    const file = join(dir, 'eigene.zip');
+    await writeFile(file, 'PK aus der eigenen Installation');
+    await expect(ops('import', 'servicedesk', file)).rejects.toThrow('--yes');
+    expect(await ops('import', 'servicedesk', file, '--yes')).toContain('eingeplant');
+    await t.cloud.runJobs();
+    expect(t.platform.state.get('servicedesk')?.restored.at(-1)).toBe(
+      'PK aus der eigenen Installation',
+    );
+  });
 });

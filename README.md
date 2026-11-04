@@ -49,6 +49,7 @@ docker compose exec cloud node dist/ops.js status
 | `canary <name> on\|off` | kommt in die erste Welle eines Rollouts (eigene und Test-Instanzen) |
 | `rollout start <version> [--wave <n>] [--now]`, `rollout status\|resume\|cancel` | eine neue Version ausrollen; Wellen nur im Wartungsfenster, `--now` für Sicherheitsupdates |
 | `backup <name>`, `restore <name> <sicherung> --yes` | Sicherung jetzt; Wiederherstellung (vorher wird der jetzige Stand gesichert) |
+| `import <name> <datei.zip> --yes` | Umzug in die Cloud: eine Sicherung aus der eigenen Lenipo-Installation des Kunden (gleiche Version) ersetzt die Daten der Instanz |
 | `sleep <name>`, `wake <name>` | Schlafen von Hand |
 | `retry <name>` | aufgegebene Jobs der Instanz neu starten |
 | `alerts` | offene Alarme mit Text |
